@@ -1,0 +1,100 @@
+@inject ScopedUiBridge Ui
+@inject IJSRuntime JS
+
+<h3 class="card-title">策略开关矩阵</h3>
+
+<div class="switch-group">
+    <div class="switch-label">交易频次策略</div>
+    <div class="switch-row">
+        <button class="btn @(Mode == "Scalping" ? "btn-active" : "")" disabled="@Busy" @onclick="OnScalping">⚡ Scalping</button>
+        <button class="btn @(Mode == "Swing" ? "btn-active" : "")" disabled="@Busy" @onclick="OnSwing">📈 Swing</button>
+    </div>
+    <div class="switch-label">标的选择范围</div>
+    <div class="switch-row">
+        <button class="btn @(Scope == "Single-Pair" ? "btn-active" : "")" disabled="@Busy" @onclick="OnSingle">🎯 Single Pair</button>
+        <button class="btn @(Scope == "Multi-Pair" ? "btn-active" : "")" disabled="@Busy" @onclick="OnMulti">🌀 Multi-Pair</button>
+    </div>
+    <div class="switch-label">聚焦标的</div>
+    <select class="sel" value="@Symbol" disabled="@Busy" @onchange="OnSymbolChanged">
+        <option value="">🤖 AI 自动聚焦</option>
+        @foreach (var s in Symbols)
+        {
+            <option value="@s">@s</option>
+        }
+    </select>
+    <div class="hint">@(Config?.FocusLocked == true ? "🔒 已锁定：手动选择的聚焦标的不被 AI 覆盖，切回“🤖 AI 自动聚焦”解锁" : "🤖 自动模式：AI 按期望值切换聚焦标的")</div>
+</div>
+
+<div class="meta">
+    <div class="meta-row"><span>数据源</span><b>@(Config?.DataSourceMode ?? "--")</b></div>
+    <div class="meta-row"><span>决策引擎</span><b>@(Config?.AiProvider ?? "--")</b></div>
+    <div class="meta-row"><span>运行状态</span><b>@(Config?.RunState ?? "--")</b></div>
+    <div class="meta-row"><span>最近一次决策</span><b>@LastDecision</b></div>
+</div>
+
+@code {
+    private string? Mode => Config?.TradingMode;
+    private string? Scope => Config?.AssetScope;
+    private string? Symbol => Config?.ActiveSymbol;
+
+    private UiConfigTick? Config => Ui.Store.Config;
+
+    private List<string> Symbols { get; } = [];
+
+    private string LastDecision => Ui.Store.Decisions.FirstOrDefault()?.ActionType ?? "--";
+
+    private bool Busy { get; set; }
+
+    protected override void OnInitialized()
+    {
+        Symbols.Clear();
+        Symbols.AddRange(Ui.Control.WatchSymbols);
+        var active = Ui.Store.Config?.ActiveSymbol;
+        if (!string.IsNullOrEmpty(active) && !Symbols.Contains(active))
+        {
+            Symbols.Add(active);
+        }
+
+        Ui.Store.Changed += OnChanged;
+    }
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    private Task OnScalping() => SetModeAsync("Scalping");
+
+    private Task OnSwing() => SetModeAsync("Swing");
+
+    private Task OnSingle() => SetScopeAsync("Single-Pair");
+
+    private Task OnMulti() => SetScopeAsync("Multi-Pair");
+
+    private async Task SetModeAsync(string mode) => await ActAsync(() => Ui.Control.SetTradingModeAsync(mode == "Swing" ? TradingMode.Swing : TradingMode.Scalping));
+
+    private async Task SetScopeAsync(string scope) => await ActAsync(() => Ui.Control.SetAssetScopeAsync(scope == "Multi-Pair" ? AssetScope.MultiPair : AssetScope.SinglePair));
+
+    private async Task OnSymbolChanged(ChangeEventArgs e)
+    {
+        if (e.Value is string s)
+        {
+            await ActAsync(() => Ui.Control.SetActiveSymbolAsync(s));
+        }
+    }
+
+    private async Task ActAsync(Func<Task> action)
+    {
+        Busy = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            await Task.Delay(300);
+            Busy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public void Dispose() => Ui.Store.Changed -= OnChanged;
+}

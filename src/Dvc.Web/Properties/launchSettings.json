@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "Dvc.Web": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:64334;http://localhost:64335"
+    },
+    "Live.Web": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Live"
+      },
+      "applicationUrl": "https://localhost:64334;http://localhost:64335"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+/* ============ 多皮肤动态切换引擎（CSS 变量主题） ============ */
+
+/* ---------- 🎮 赛博极客暗黑风（默认） ---------- */
+[data-theme="cyberpunk"] {
+    --bg: #080b14;
+    --panel: #0f1424;
+    --panel-border: #1e2740;
+    --text: #e6e9f2;
+    --text-dim: #8b93ad;
+    --accent-pos: #22ff88;   /* 荧光绿：买单/盈利 */
+    --accent-neg: #ff2d78;   /* 霓虹粉：卖单/亏损 */
+    --accent-info: #3d7bff;  /* 科技蓝：AI 思考链 */
+    --btn-bg: #141b30;
+    --think-bg: #101830;
+    --think-text: #b8c6e8;
+    --chart-grid: #1c2542;
+    --glow: 0 0 18px rgba(61, 123, 255, .07);
+}
+
+/* ---------- 📈 传统金融专业风 ---------- */
+[data-theme="classic"] {
+    --bg: #f4f6f8;
+    --panel: #ffffff;
+    --panel-border: #d8dee6;
+    --text: #1c2733;
+    --text-dim: #6b7a8a;
+    --accent-pos: #00a84f;   /* 标准金融红绿：红涨 */
+    --accent-neg: #d4242f;
+    --accent-info: #0f6cbd;
+    --btn-bg: #eef1f5;
+    --think-bg: #f7f9fb;
+    --think-text: #33475b;
+    --chart-grid: #dfe5ec;
+    --glow: 0 1px 3px rgba(20, 35, 50, .08);
+}
+
+/* ---------- 🌱 极简主义护眼风（莫兰迪色系） ---------- */
+[data-theme="mint"] {
+    --bg: #f3efe6;
+    --panel: #fbf8f1;
+    --panel-border: #ddd5c4;
+    --text: #4a4a45;
+    --text-dim: #938d7d;
+    --accent-pos: #7d9c84;   /* 低饱和豆绿 */
+    --accent-neg: #c08a8a;   /* 低饱和豆粉 */
+    --accent-info: #8a94b8;  /* 低饱和雾蓝 */
+    --btn-bg: #efe9dc;
+    --think-bg: #f6f1e6;
+    --think-text: #6b6759;
+    --chart-grid: #e4ddcd;
+    --glow: none;
+}

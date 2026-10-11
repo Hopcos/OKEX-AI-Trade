@@ -1,0 +1,59 @@
+@inherits LayoutComponentBase
+@inject ScopedUiBridge Ui
+@inject IJSRuntime JS
+@inject Dvc.Core.Configuration.TradingOptions Opt
+
+<div class="shell">
+    <div class="topbar">
+        <div class="brand">
+            <span class="brand-logo">◈</span>
+            <div>
+                <div class="brand-title">OKEX-AI 自动交易 · Intern-Decision</div>
+                <div class="brand-sub">纯现货 · 数据源 @Ds · @Ai 引擎 · @Tm / @Sc</div>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <span class="badge @StateBadgeClass">@StateBadgeText</span>
+            <ThemeSwitcher />
+        </div>
+    </div>
+
+    <nav class="nav">
+        <NavLink href="/" Match="NavLinkMatch.All" class="nav-link">📊 实时看板</NavLink>
+        <NavLink href="/history" class="nav-link">🗂 复盘数据库</NavLink>
+    </nav>
+
+    <main class="content">
+        @Body
+    </main>
+
+    <footer class="footer">
+        <span>初始本金 $@(Opt.InitialCapital.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)) · 单笔上限 = (初始本金 + max(0, 权益 − 初始本金)) × @(Opt.MaxOrderSizeRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture)) · 硬熔断线 = 初始本金 × @(Opt.CircuitBreakerRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture))</span>
+        <span id="signalr-status" style="display:none"></span>
+    </footer>
+</div>
+
+@code {
+    // 副标题取运行时快照（Config），初始尚未到达时回退到 appsettings 绑定值（Opt），保证首屏即显示实际配置。
+    private string Ds => Ui.Store.Config?.DataSourceMode ?? Opt.DataSourceMode.ToString();
+    private string Ai => Ui.Store.Config?.AiProvider ?? Opt.AiProvider.ToString();
+    private string Tm => Ui.Store.Config?.TradingMode ?? Opt.DefaultTradingMode.ToString();
+    private string Sc => Ui.Store.Config?.AssetScope
+        ?? (Opt.DefaultAssetScope == Dvc.Core.AssetScope.MultiPair ? "Multi-Pair" : "Single-Pair");
+
+    private string StateBadgeText => Ui.Store.Halts.Count > 0 ? "🚨 已熔断停机" : (Ui.Store.Account?.RunState == "Halted" ? "🚨 已熔断停机" : "🟢 运行中");
+
+    private string StateBadgeClass => Ui.Store.Halts.Count > 0 || Ui.Store.Account?.RunState == "Halted" ? "badge badge-danger" : "badge badge-ok";
+
+    protected override void OnInitialized()
+    {
+        Ui.Store.Changed += OnStoreChanged;
+    }
+
+    private async void OnStoreChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Ui.Store.Changed -= OnStoreChanged;
+    }
+}

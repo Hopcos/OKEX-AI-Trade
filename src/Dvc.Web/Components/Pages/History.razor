@@ -1,0 +1,163 @@
+@page "/history"
+@inject ScopedUiBridge Ui
+@inject OrderRepository OrdersRepo
+@inject ThoughtRepository ThoughtsRepo
+@inject RiskInterceptRepository InterceptsRepo
+@inject SettlementRepository SettlementsRepo
+
+<PageTitle>复盘数据库 · OKEX-AI 自动交易</PageTitle>
+
+<h1 class="page-title">🗂 复盘数据库（SQLite · WAL）</h1>
+
+<div class="card">
+    <h3 class="card-title">Agent_Thought_Log · AI 思考日志</h3>
+    <div class="table-scroll">
+        <table class="table">
+            <thead>
+                <tr><th>#</th><th>时间</th><th>触发</th><th>诊断</th><th>动作</th><th>风控否决</th><th>权益</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var t in Thoughts)
+                {
+                    <tr>
+                        <td>@t.Id</td>
+                        <td>@Fmt.Time(t.CreatedAtUtc)</td>
+                        <td>@t.TriggerReason</td>
+                        <td class="diag">@t.Diagnosis</td>
+                        <td><span class="badge badge-info">@t.ActionType</span></td>
+                        <td>@(t.RiskVetoed ? "🛡 " + t.RiskReason : "—")</td>
+                        <td>$@Fmt.Money(t.EquityAfter)</td>
+                    </tr>
+                }
+                @if (Thoughts.Count == 0)
+                {
+                    <tr><td colspan="7" class="hint">等待 AI 首次决策写入……</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="grid">
+    <div class="card col-6">
+        <h3 class="card-title">Trade_Order · 交易流水</h3>
+        <div class="table-scroll">
+            <table class="table">
+                <thead><tr><th>#</th><th>时间</th><th>币种</th><th>方向</th><th>价格</th><th>金额</th><th>状态</th><th>已实现盈亏</th></tr></thead>
+                <tbody>
+                    @foreach (var o in Orders)
+                    {
+                        <tr>
+                            <td>@o.Id</td>
+                            <td>@Fmt.Time(o.CreatedAtUtc)</td>
+                            <td>@o.Symbol</td>
+                            <td class="@(o.Side == OrderSide.Buy ? "pos" : "neg")">@(o.Side == OrderSide.Buy ? "买入" : "卖出")</td>
+                            <td>@Fmt.Price(o.Price)</td>
+                            <td>$@Fmt.Money(o.AmountUsd)</td>
+                            <td>@o.Status</td>
+                            <td class="@(o.RealizedPnl >= 0 ? "pos" : "neg")">@Fmt.Signed(o.RealizedPnl)</td>
+                        </tr>
+                    }
+                    @if (Orders.Count == 0)
+                    {
+                        <tr><td colspan="8" class="hint">暂无订单</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card col-6">
+        <h3 class="card-title">Risk_Intercept · 风控拦截</h3>
+        <div class="table-scroll">
+            <table class="table">
+                <thead><tr><th>时间</th><th>类型</th><th>币种</th><th>详情</th></tr></thead>
+                <tbody>
+                    @foreach (var r in Intercepts)
+                    {
+                        <tr>
+                            <td>@Fmt.Time(r.CreatedAtUtc)</td>
+                            <td><span class="badge badge-danger">@r.Kind</span></td>
+                            <td>@r.Symbol</td>
+                            <td class="diag">@r.Detail</td>
+                        </tr>
+                    }
+                    @if (Intercepts.Count == 0)
+                    {
+                        <tr><td colspan="4" class="hint">暂无拦截</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h3 class="card-title">Asset_Snapshot · 账户镜像</h3>
+    <div class="table-scroll">
+        <table class="table">
+            <thead><tr><th>#</th><th>时间</th><th>类别</th><th>初始本金</th><th>可用 USD</th><th>总权益</th><th>已实现盈亏</th><th>最大下单上限</th></tr></thead>
+            <tbody>
+                @foreach (var s in Settlements)
+                {
+                    <tr>
+                        <td>@s.Id</td>
+                        <td>@Fmt.Time(s.SnapshotAtUtc)</td>
+                        <td>@s.Kind</td>
+                        <td>$@Fmt.Money(s.InitialCapital)</td>
+                        <td>$@Fmt.Money(s.AvailableUsd)</td>
+                        <td>$@Fmt.Money(s.EquityUsd)</td>
+                        <td class="@(s.RealizedPnl >= 0 ? "pos" : "neg")">@Fmt.Signed(s.RealizedPnl)</td>
+                        <td>$@Fmt.Money(s.MaxOrderSize)</td>
+                    </tr>
+                }
+                @if (Settlements.Count == 0)
+                {
+                    <tr><td colspan="8" class="hint">暂无结算快照</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+@code {
+    private List<ThoughtRecord> Thoughts { get; set; } = [];
+    private List<OrderRecord> Orders { get; set; } = [];
+    private List<RiskInterceptRecord> Intercepts { get; set; } = [];
+    private List<AccountSettlement> Settlements { get; set; } = [];
+    private DateTime _lastReload = DateTime.MinValue;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Ui.Store.Changed += OnChanged;
+        await LoadAsync();
+    }
+
+    private async void OnChanged()
+    {
+        // 页面级 DB 重载节流：最多 2 秒一次（对接 1 秒级行情流不阻塞）
+        if (DateTime.UtcNow - _lastReload < TimeSpan.FromSeconds(2))
+        {
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        _lastReload = DateTime.UtcNow;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        var ct = CancellationToken.None;
+        Thoughts = [.. await ThoughtsRepo.ListRecentAsync(40, ct)];
+        Orders = [.. await OrdersRepo.ListRecentAsync(40, ct)];
+        Intercepts = [.. await InterceptsRepo.ListRecentAsync(15, ct)];
+        Settlements = [.. await SettlementsRepo.ListRecentAsync(30, ct)];
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Ui.Store.Changed -= OnChanged;
+    }
+}

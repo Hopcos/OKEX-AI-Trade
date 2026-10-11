@@ -1,0 +1,12 @@
+<Router AppAssembly="typeof(App).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)" />
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="typeof(MainLayout)">
+            <h1>404 · 页面不存在</h1>
+            <p>该 URL 没有对应的看板页面。</p>
+        </LayoutView>
+    </NotFound>
+</Router>

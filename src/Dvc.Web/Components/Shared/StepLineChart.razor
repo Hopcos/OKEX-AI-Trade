@@ -1,0 +1,89 @@
+@inject ScopedUiBridge Ui
+
+<h3 class="card-title">复利阶梯曲线图</h3>
+
+@if (Points.Count < 2)
+{
+    <div class="hint">等待账户快照累积（1 秒级推送，约 10 秒后出现曲线）……</div>
+}
+else
+{
+    <div class="chart-wrap">
+        <svg viewBox="0 0 600 220" preserveAspectRatio="none" class="chart-svg">
+            @* 网格线 *@
+            @for (var i = 0; i <= 4; i++)
+            {
+                var y = 16 + i * 47;
+                <line x1="0" y1="@y" x2="600" y2="@y" class="chart-grid" />
+            }
+
+            @* 初始本金红线（横向死守） *@
+            <line x1="0" y1="@Y(Initial)" x2="600" y2="@Y(Initial)" class="chart-line-initial" stroke-dasharray="6 4" />
+
+            @* 当前最大下单上限蓝线（复利阶梯） *@
+            <polyline points="@MaxOrderPoints" class="chart-line-max" fill="none" />
+
+            @* 总权益绿线（阶梯式抬升） *@
+            <polyline points="@EquityPoints" class="chart-line-equity" fill="none" />
+
+            @* 末点圆点 *@
+            <circle cx="598" cy="@Y(LastEquity)" r="4" class="chart-dot-equity" />
+        </svg>
+        <div class="chart-overlay-label" style="top: @(Y(Initial) / 2.2m)% ; color: var(--accent-neg);">$@Initial.ToString("0.00") 初始本金红线</div>
+        <div class="chart-overlay-label" style="top: @(Y(LastMax) / 2.2m)%; color: var(--accent-info);">上限 $@LastMax.ToString("0.00")</div>
+    </div>
+    <div class="chart-legend">
+        <span class="legend-item"><i class="swatch sw-equity"></i>总权益（复利阶梯）</span>
+        <span class="legend-item"><i class="swatch sw-initial"></i>初始本金 $@Initial.ToString("0.00")</span>
+        <span class="legend-item"><i class="swatch sw-max"></i>最大下单上限（@((Store.Account?.MaxOrderSizeRatio ?? 0.20m).ToString("P0")) 复利）</span>
+    </div>
+}
+
+@code {
+    private UiEventStore Store => Ui.Store;
+    private IReadOnlyList<UiEventStore.AccountPoint> Points => Store.AccountHistory;
+    private decimal Initial => Store.Account?.InitialCapital ?? 20m;
+    private decimal LastEquity => Points.Count > 0 ? Points[^1].Equity : Initial;
+    private decimal LastMax => Points.Count > 0 ? Points[^1].MaxOrderSize : 0m;
+
+    private decimal MinV => Math.Min(Initial, Points.Count > 0 ? Points.Min(p => Math.Min(p.Equity, p.MaxOrderSize)) : Initial);
+    private decimal MaxV => Math.Max(Initial, Points.Count > 0 ? Points.Max(p => Math.Max(p.Equity, p.MaxOrderSize)) : Initial + 1m);
+
+    private string EquityPoints => BuildLine(p => p.Equity);
+    private string MaxOrderPoints => BuildLine(p => p.MaxOrderSize);
+
+    private string BuildLine(Func<UiEventStore.AccountPoint, decimal> selector)
+    {
+        if (Points.Count == 0)
+        {
+            return "";
+        }
+
+        var parts = new List<string>();
+        var n = Points.Count;
+        for (var i = 0; i < n; i++)
+        {
+            var x = i == 0 ? 0 : 600m * i / (n - 1);
+            parts.Add($"{(int)x},{Y(selector(Points[i])):0}");
+        }
+
+        return string.Join(' ', parts);
+    }
+
+    private decimal Y(decimal v)
+    {
+        var range = MaxV - MinV;
+        if (range <= 0)
+        {
+            return 120;
+        }
+
+        return 200 - (v - MinV) / range * 190m;
+    }
+
+    protected override void OnInitialized() => Store.Changed += OnChanged;
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Store.Changed -= OnChanged;
+}

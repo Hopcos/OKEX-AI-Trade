@@ -1,0 +1,63 @@
+@inject ScopedUiBridge Ui
+
+<h3 class="card-title">盘口微观结构</h3>
+
+@{ var active = Active; }
+
+@if (active is not null)
+{
+    <div class="ticker">
+        <div class="ticker-left">
+            <div class="symbol">@active.Symbol</div>
+            <div class="price">@Fmt.Price(active.LastPrice)</div>
+            <div class="row-meta">
+                <span>买一 <b style="color:var(--accent-pos)">@Fmt.Price(active.BestBid)</b></span>
+                <span>卖一 <b style="color:var(--accent-neg)">@Fmt.Price(active.BestAsk)</b></span>
+            </div>
+        </div>
+        <div class="ticker-right">
+            <div class="metric"><span class="m-label">价差</span><span class="m-val">@Fmt.Bps(active.SpreadBps) bps</span></div>
+            <div class="metric"><span class="m-label">15M 趋势</span><span class="m-val @Fmt.TrendClass(active.Trend15M)">@active.Trend15M</span></div>
+            <div class="metric"><span class="m-label">15M 涨跌</span><span class="m-val @(active.Change15M >= 0 ? "pos" : "neg")">@active.Change15M.ToString("+0.00;-0.00", CultureInfo.InvariantCulture)%</span></div>
+            <div class="metric"><span class="m-label">1H 波幅</span><span class="m-val">@Fmt.Bps(active.Vol1H)%</span></div>
+            <div class="metric"><span class="m-label">5M 成交额</span><span class="m-val">$@Fmt.Money(active.Turnover5M)</span></div>
+        </div>
+    </div>
+
+    <div class="imbalance">
+        <div class="ib-label">盘口不平衡度 @active.Imbalance.ToString("+0.000;-0.000", CultureInfo.InvariantCulture)</div>
+        <div class="ib-bar">
+            <div class="ib-fill" style="width: calc(50% + @(Math.Clamp(active.Imbalance, -0.4m, 0.4m) * 125m)%); background: @(active.Imbalance >= 0 ? "var(--accent-pos)" : "var(--accent-neg)");"></div>
+        </div>
+        <div class="ib-axis"><span>卖压</span><span>中性</span><span>买压</span></div>
+    </div>
+}
+else
+{
+    <div class="hint">等待行情数据……</div>
+}
+
+<h4 class="sub-title">Multi-Pair 候选观察</h4>
+<div class="pair-table">
+    @foreach (var m in Store.AllMarkets().Where(m => m.Symbol != Active?.Symbol).Take(9))
+    {
+        <div class="pair-row">
+            <span>@m.Symbol</span>
+            <span>@Fmt.Price(m.LastPrice)</span>
+            <span class="@Fmt.TrendClass(m.Trend15M)">@m.Trend15M</span>
+            <span>@m.Imbalance.ToString("+0.00;-0.00", CultureInfo.InvariantCulture)</span>
+        </div>
+    }
+</div>
+
+@code {
+    private UiEventStore Store => Ui.Store;
+
+    private UiMarketTick? Active => Ui.Store.Config is null ? null : Store.GetMarket(Ui.Store.Config.ActiveSymbol);
+
+    protected override void OnInitialized() => Store.Changed += OnChanged;
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Store.Changed -= OnChanged;
+}

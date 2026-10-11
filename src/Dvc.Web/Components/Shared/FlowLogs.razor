@@ -1,0 +1,47 @@
+@inject ScopedUiBridge Ui
+
+<h3 class="card-title">流水 / 决策中枢广播</h3>
+
+<div class="scroll-list tall">
+    @foreach (var d in Store.Decisions.Take(4))
+    {
+        <div class="decision-line">
+            <div class="d-head">
+                <span class="badge badge-info">决策 @d.ActionType</span>
+                <span class="d-time">@Fmt.Time(DateTime.UtcNow)</span>
+                @if (d.Vetoed)
+                {
+                    <span class="badge badge-danger">被风控否决</span>
+                }
+            </div>
+            <div class="d-diagnosis">@d.Diagnosis</div>
+            @if (!string.IsNullOrEmpty(d.ActionProbabilities))
+            {
+                <div class="d-prob">action.probabilities → @d.ActionProbabilities</div>
+            }
+            @if (!string.IsNullOrEmpty(d.StopWaitProbabilities))
+            {
+                <div class="d-prob">stop_and_wait.probabilities → @d.StopWaitProbabilities</div>
+            }
+            @if (d.Vetoed)
+            {
+                <div class="d-veto">🛡 @d.VetoReason</div>
+            }
+        </div>
+    }
+
+    @foreach (var f in Store.Flows.Take(18))
+    {
+        <div class="log-line">@f.Message</div>
+    }
+</div>
+
+@code {
+    private UiEventStore Store => Ui.Store;
+
+    protected override void OnInitialized() => Store.Changed += OnChanged;
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Store.Changed -= OnChanged;
+}

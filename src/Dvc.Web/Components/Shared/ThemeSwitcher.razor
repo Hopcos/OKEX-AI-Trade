@@ -1,0 +1,39 @@
+@inject ScopedUiBridge Ui
+@inject IJSRuntime JS
+
+<div class="skin-switcher">
+    <button class="skin-btn @(Current == "cyberpunk" ? "active" : "")" title="赛博极客暗黑风（默认，夜间挂机）" @onclick="OnCyberpunk">
+        🎮<span>赛博极客</span>
+    </button>
+    <button class="skin-btn @(Current == "classic" ? "active" : "")" title="传统金融专业风（白天复盘审计）" @onclick="OnClassic">
+        📈<span>金融专业</span>
+    </button>
+    <button class="skin-btn @(Current == "mint" ? "active" : "")" title="极简主义护眼风（莫兰迪色系，副屏挂机）" @onclick="OnMint">
+        🌱<span>护眼极简</span>
+    </button>
+</div>
+
+@code {
+    private string? Current => Ui.Store.Config?.Theme ?? "cyberpunk";
+
+    protected override void OnInitialized()
+    {
+        Ui.Store.Changed += OnChanged;
+    }
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    private Task OnCyberpunk() => SetThemeAsync("cyberpunk");
+
+    private Task OnClassic() => SetThemeAsync("classic");
+
+    private Task OnMint() => SetThemeAsync("mint");
+
+    private async Task SetThemeAsync(string theme)
+    {
+        await JS.InvokeVoidAsync("dvc.applyTheme", theme);
+        await Ui.Control.SetThemeAsync(theme);
+    }
+
+    public void Dispose() => Ui.Store.Changed -= OnChanged;
+}

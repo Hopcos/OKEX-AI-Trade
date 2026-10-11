@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- 引擎库(Core/Persistence/Exchange/Ai/Engine)均为 AOT 兼容(IsAotCompatible)。
+         Blazor Server 看板当前不支持 trimming/native AOT（框架官方限制），
+         故 Web 宿主以 JIT 发布；如需原生 AOT 发布引擎，可拆分独立控制台宿主。 -->
+    <PublishAot>false</PublishAot>
+    <RootNamespace>Dvc.Web</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dvc.Engine\Dvc.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

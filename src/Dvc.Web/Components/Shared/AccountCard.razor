@@ -1,0 +1,45 @@
+@inject ScopedUiBridge Ui
+
+<div class="acct-grid">
+    <div class="acct-big">
+        <div class="label">总权益 (USD)</div>
+        <div class="value" style="color: var(--accent-pos);">@Fmt.Eq(Store.Account?.EquityUsd)</div>
+        <div class="label sub">盈亏 @Fmt.Signed(Store.Account?.AccumulatedProfit)</div>
+    </div>
+    <div class="acct-cell">
+        <div class="label">可用 USD</div>
+        <div class="value small">@Fmt.Money(Store.Account?.AvailableUsd)</div>
+    </div>
+    <div class="acct-cell">
+        <div class="label">初始本金红线</div>
+        <div class="value small" style="color: var(--accent-neg);">@Fmt.Money(Store.Account?.InitialCapital)</div>
+    </div>
+    <div class="acct-cell">
+        <div class="label">最大下单上限</div>
+        <div class="value small" style="color: var(--accent-info);">@Fmt.Money(Store.Account?.MaxOrderSize)</div>
+    </div>
+</div>
+
+@if (Store.Account?.Holdings is { Count: > 0 })
+{
+    <div class="holdings">
+        @foreach (var h in Store.Account.Holdings)
+        {
+            <span class="chip">@h.Key: @h.Value.ToString("0.########", CultureInfo.InvariantCulture)</span>
+        }
+    </div>
+}
+else
+{
+    <div class="hint">空仓 · 全部资金以 USD 持有（锁定现金）</div>
+}
+
+@code {
+    private UiEventStore Store => Ui.Store;
+
+    protected override void OnInitialized() => Store.Changed += OnChanged;
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Store.Changed -= OnChanged;
+}

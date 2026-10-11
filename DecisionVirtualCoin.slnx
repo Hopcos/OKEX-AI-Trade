@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".gitignore" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Dvc.Ai/Dvc.Ai.csproj" />
+    <Project Path="src/Dvc.Core/Dvc.Core.csproj" />
+    <Project Path="src/Dvc.Engine/Dvc.Engine.csproj" />
+    <Project Path="src/Dvc.Exchange/Dvc.Exchange.csproj" />
+    <Project Path="src/Dvc.Persistence/Dvc.Persistence.csproj" />
+    <Project Path="src/Dvc.Web/Dvc.Web.csproj" />
+  </Folder>
+</Solution>

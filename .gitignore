@@ -1,0 +1,21 @@
+# .NET
+bin/
+obj/
+*.user
+
+# 运行产物：Sqlite 数据库 / 日志
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# 密钥类（不要提交真实 Key）
+appsettings.*.Local.json
+appsettings.Live.json
+local.settings.json

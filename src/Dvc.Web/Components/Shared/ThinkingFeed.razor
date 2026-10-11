@@ -1,0 +1,145 @@
+@inject ScopedUiBridge Ui
+
+<h3 class="card-title">🤖 AI 思考链实时回显 <span class="typing-cursor">▍</span></h3>
+
+<div class="thinking-feed">
+    @if (Sessions.Count == 0)
+    {
+        <div class="hint">等待 AI 第一次决策唤醒……（默认 1 秒级策略节拍 + 1 小时宏观轮询）</div>
+    }
+
+    @foreach (var s in Sessions.Take(3))
+    {
+        <div class="think-block @(s.Active ? "active" : "")">
+            <div class="think-head">
+                <span class="think-trigger">@s.Trigger</span>
+                <span class="think-session">@s.ShortId</span>
+                <span class="think-time">@s.UpdatedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+            </div>
+            <pre class="think-body">@s.Text</pre>
+        </div>
+    }
+</div>
+
+@code {
+    private readonly object _gate = new();
+    private readonly Dictionary<string, ThinkingSession> _sessions = [];
+
+    private List<ThinkingSession> Sessions
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _sessions.Values.OrderByDescending(s => s.UpdatedAt).ToList();
+            }
+        }
+    }
+
+    private UiEventStore Store => Ui.Store;
+
+    protected override void OnInitialized()
+    {
+        Store.ThoughtChunk += OnThoughtChunk;
+        Store.Changed += OnChanged;
+        RestoreFromStore();
+    }
+
+    // 页面切换（复盘数据库 ⇄ 实时看板）会销毁/重建本组件：仓库是单例并持有全部分片缓冲，
+    // 重挂载时回放历史分片，保证思考链不因 Tab 切换而清空。
+    private void RestoreFromStore()
+    {
+        foreach (var chunk in Store.AllThoughtChunks())
+        {
+            ThinkingSession s;
+            lock (_gate)
+            {
+                if (!_sessions.TryGetValue(chunk.SessionId, out s!))
+                {
+                    s = new ThinkingSession(chunk.SessionId, chunk.Trigger);
+                    _sessions[chunk.SessionId] = s;
+                }
+            }
+
+            s.Append(chunk.Text);
+        }
+    }
+
+    private void OnThoughtChunk(UiThoughtChunk chunk)
+    {
+        ThinkingSession s;
+        lock (_gate)
+        {
+            if (!_sessions.TryGetValue(chunk.SessionId, out s!))
+            {
+                s = new ThinkingSession(chunk.SessionId, chunk.Trigger);
+                _sessions[chunk.SessionId] = s;
+            }
+        }
+
+        s.Append(chunk.Text);
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private async void OnChanged() => await InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Store.ThoughtChunk -= OnThoughtChunk;
+        Store.Changed -= OnChanged;
+    }
+
+    private sealed class ThinkingSession
+    {
+        private readonly object _gate = new();
+        private readonly System.Text.StringBuilder _sb = new();
+        private DateTime _updatedAt = DateTime.UtcNow;
+
+        public ThinkingSession(string sessionId, string trigger)
+        {
+            SessionId = sessionId;
+            Trigger = trigger;
+        }
+
+        public string SessionId { get; }
+
+        public string ShortId => SessionId[..Math.Min(8, SessionId.Length)];
+
+        public string Trigger { get; }
+
+        public DateTime UpdatedAt
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _updatedAt;
+                }
+            }
+        }
+
+        public bool Active => true;
+
+        public string Text
+        {
+            get
+            {
+                // 与 Append 共用同一把锁：事件循环线程写、渲染线程读，
+                // 不加锁会让 StringBuilder 内部块遍历在并发下崩溃（ArgumentOutOfRangeException: chunkLength）。
+                lock (_gate)
+                {
+                    return _sb.ToString();
+                }
+            }
+        }
+
+        public void Append(string text)
+        {
+            lock (_gate)
+            {
+                _sb.Append(text);
+                _updatedAt = DateTime.UtcNow;
+            }
+        }
+    }
+}
