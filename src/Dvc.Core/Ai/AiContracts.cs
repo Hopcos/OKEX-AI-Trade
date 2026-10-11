@@ -41,6 +41,10 @@ public sealed class AiFinancialMetrics
     [JsonPropertyName("Current_Total_Equity")]
     public decimal CurrentTotalEquity { get; set; }
 
+    /// <summary>当前可用 USD 现金（未买入部分）——决定能否再买；耗尽时禁止 buy，否则会被风控以余额不足拦截。</summary>
+    [JsonPropertyName("Available_USD")]
+    public decimal AvailableUsd { get; set; }
+
     [JsonPropertyName("Accumulated_Profit")]
     public decimal AccumulatedProfit { get; set; }
 

@@ -93,7 +93,15 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
         sb.AppendLine("【策略】高频现货限价微套：默认持续在市场内挂单；仅当盘口无任何微套空间时才观望（hold）。禁止做空/杠杆，只允许限价单。");
         sb.AppendLine($"【触发】{i.TriggerReason}，系统时间 {i.SystemTime}");
         sb.AppendLine($"【账户】初始本金 ${fm.InitialCapital:0.00}，当前总权益 ${fm.CurrentTotalEquity:0.00}，累计盈亏 ${fm.AccumulatedProfit:0.00}，" +
-                      $"风控上限 ${fm.MaxAllowedOrderSize:0.00}，最近亏损 ${fm.LastTradeLossAmount:0.00}，持仓 {fm.PositionBaseQty:0.########}，已实现盈亏 ${fm.RealizedPnl:0.00}");
+                      $"可用 USD ${fm.AvailableUsd:0.00}，风控上限 ${fm.MaxAllowedOrderSize:0.00}，最近亏损 ${fm.LastTradeLossAmount:0.00}，持仓 {fm.PositionBaseQty:0.########}，已实现盈亏 ${fm.RealizedPnl:0.00}");
+        if (fm.AvailableUsd < 1m && fm.PositionBaseQty > 0m)
+        {
+            sb.AppendLine("【资金约束】可用 USD 已几乎耗尽（资金已全部买入持仓）。此时切勿选择 buy——会因可用 USD 不足被风控拦截并反复重试；应选择 sell 释放资金，或 hold 等待。");
+        }
+        else if (fm.AvailableUsd < 1m)
+        {
+            sb.AppendLine("【资金约束】可用 USD 不足（< $1），无法再开新买单；请选择 sell 或 hold。");
+        }
         sb.AppendLine($"【配置】模式 {cfg.TradingMode}，范围 {cfg.AssetScope}，聚焦 {cfg.ActiveSymbol}，黑名单 {string.Join(',', cfg.Blacklist)}");
         if (ms.ActiveSymbolOrderbook is { } book)
         {
@@ -154,12 +162,12 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
             ["action"] = new JsonObject
             {
                 ["type"] = "choice",
-                ["instructions"] = "本策略是高频现货限价微套（Scalping），正常应持续在市场内挂单；除非当前确实没有微套空间，否则请优先在 buy / sell 中二选一，不要选 hold。结合盘口五档、价差、不平衡与持仓判断：",
+                ["instructions"] = "本策略是高频现货限价微套（Scalping），正常应持续在市场内挂单；除非当前确实没有微套空间，否则请优先在 buy / sell 中二选一，不要选 hold。结合盘口五档、价差、不平衡与持仓判断。重要：务必先看【资金约束】行——若可用 USD 不足以买单，切勿选 buy（会被风控以余额不足拦截并反复重试），应选 sell 或 hold。",
                 ["criteria"] = new JsonObject
                 {
-                    ["buy"] = "挂限价买单：买一支撑厚（不平衡>0）或价格回踩买一/买二支撑时，吃回调/微套；活跃震荡市优先此项",
-                    ["sell"] = "挂限价卖单：已持仓且到达止盈/认赔位，或卖一压力重（不平衡<0）时离场",
-                    ["hold"] = "仅当无任何微套空间才观望：价差过宽、五档无支撑压力、波动不足以覆盖手续费（例外，非常态）",
+                    ["buy"] = "挂限价买单：买一支撑厚（不平衡>0）或价格回踩买一/买二支撑时，吃回调/微套；活跃震荡市优先此项（需可用 USD 足够）",
+                    ["sell"] = "挂限价卖单：已持仓且到达止盈/认赔位，或卖一压力重（不平衡<0）时离场（可释放资金）",
+                    ["hold"] = "仅当无任何微套空间才观望：价差过宽、五档无支撑压力、波动不足以覆盖手续费，或可用 USD 不足以买单（例外，非常态）",
                     ["cancel_all"] = "环境扭转/单边暴跌时撤销全部挂单，退守现金",
                 },
             },

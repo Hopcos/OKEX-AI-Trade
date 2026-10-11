@@ -41,6 +41,7 @@ public static class AiInputBuilder
             {
                 InitialCapital = Math.Round(config.InitialCapital, 2),
                 CurrentTotalEquity = Math.Round(account.EquityUsd, 2),
+                AvailableUsd = Math.Round(account.AvailableUsd, 2),
                 AccumulatedProfit = Math.Round(account.AccumulatedProfit, 2),
                 MaxAllowedOrderSize = Math.Round(account.MaxOrderSize, 2),
                 LastTradeLossAmount = Math.Round(lastLoss, 2),
