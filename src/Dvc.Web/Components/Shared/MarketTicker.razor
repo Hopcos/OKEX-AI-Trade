@@ -32,6 +32,10 @@
         <div class="ib-axis"><span>卖压</span><span>中性</span><span>买压</span></div>
     </div>
 }
+else if (Ui.Store.Config is { } cfg)
+{
+    <div class="hint">@cfg.ActiveSymbol 行情数据就绪中……（若为 Single-Pair，切换标的后下一 tick 即出）</div>
+}
 else
 {
     <div class="hint">等待行情数据……</div>

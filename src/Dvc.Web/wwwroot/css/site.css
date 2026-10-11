@@ -65,6 +65,7 @@ body {
     gap: 12px;
 }
 
+.col-2 { grid-column: span 2; }
 .col-3 { grid-column: span 3; }
 .col-4 { grid-column: span 4; }
 .col-6 { grid-column: span 6; }
@@ -357,5 +358,5 @@ body {
 
 /* 移动端紧凑 */
 @media (max-width: 1100px) {
-    .col-3, .col-4, .col-6 { grid-column: span 12; }
+    .col-2, .col-3, .col-4, .col-6 { grid-column: span 12; }
 }

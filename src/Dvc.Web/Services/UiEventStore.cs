@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dvc.Core;
 using Dvc.Core.Events;
+using Dvc.Core.Trading;
 using Dvc.Engine;
 
 namespace Dvc.Web.Services;
@@ -34,11 +35,27 @@ public sealed class UiEventStore : IDisposable
     public event Action<UiOrderEvent>? OrderArrived;
     public event Action<UiHaltEvent>? Halted;
 
-    public UiEventStore(EngineEventBus bus)
+    public UiEventStore(EngineEventBus bus, RuntimeState runtime)
     {
+        // 构造时直接用运行态快照初始化 Config：单例是延迟创建的（首个电路才建），
+        // 启动时的 ModeChanged 广播可能因通道尚未创建而丢失，导致 Ui.Store.Config 一直为 null，
+        // 进而"盘口微观结构"等依赖 Config.ActiveSymbol 的模块永远显示"等待行情数据"。
+        _config = ToTick(runtime.Snapshot());
         _channel = bus.CreateChannel();
         _loop = Task.Run(LoopAsync);
     }
+
+    private static UiConfigTick ToTick(TradingConfig cfg) => new()
+    {
+        TradingMode = cfg.TradingMode.ToString(),
+        AssetScope = cfg.AssetScope == AssetScope.MultiPair ? "Multi-Pair" : "Single-Pair",
+        ActiveSymbol = cfg.ActiveSymbol,
+        FocusLocked = cfg.FocusLocked,
+        DataSourceMode = cfg.DataSourceMode.ToString(),
+        AiProvider = cfg.AiProvider.ToString(),
+        RunState = cfg.RunState.ToString(),
+        Theme = cfg.Theme,
+    };
 
     public UiAccountTick? Account
     {

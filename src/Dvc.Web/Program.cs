@@ -26,6 +26,18 @@ catch
 // ============ 宿主：局域网安全绑定（硬编码 localhost:5000） ============
 builder.WebHost.UseUrls("http://localhost:5000");
 
+// 无条件加载静态资源清单（_framework/blazor.web.js 等框架资源来自 NuGet 包，
+// 默认仅在 Development 环境加载）。实盘跑 Live/Production 环境时若不加载，
+// blazor.web.js 会 404，导致看板全部交互（点击/联动/思考链）失效。
+try
+{
+    builder.WebHost.UseStaticWebAssets();
+}
+catch
+{
+    // UseStaticWebAssets 在个别托管环境下可能不支持，忽略并继续（Development 下本已生效）
+}
+
 var options = builder.Configuration.GetSection(TradingOptions.SectionName).Get<TradingOptions>() ?? new TradingOptions();
 
 // .NET 10 ConfigurationBinder 对"默认值非空的集合属性"是追加而非替换
@@ -225,14 +237,27 @@ app.MapRazorComponents<Dvc.Web.Components.App>()
 app.MapHub<TradingHub>("/hubs/trading");
 
 app.Lifetime.ApplicationStarted.Register(() =>
-    Console.WriteLine($"""
-        ╔══════════════════════════════════════════════════════════╗
-        ║  OKEX-AI 自动交易 · 决策虚拟币 · 本机看板已启动              ║
-        ║  地址   : http://localhost:5000                            ║
-        ║  数据源 : {options.DataSourceMode,-12}  AI : {options.AiProvider,-10}  初始本金 ${config.InitialCapital:0.00} ║
-        ║  数据库 : {ResolveDbPath(options)}                         ║
-        ╚══════════════════════════════════════════════════════════╝
-        """));
+{
+    // 启动即广播当前配置快照：确保看板 Ui.Store.Config 永不为 null，
+    // 否则"盘口微观结构"等依赖 Config.ActiveSymbol 的模块会一直显示"等待行情数据"。
+    try
+    {
+        app.Services.GetRequiredService<Dvc.Engine.TradingControlService>().BroadcastCurrentConfig();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[启动] 配置快照广播失败（不影响运行）：{ex.Message}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+    Console.WriteLine("║  OKEX-AI 自动交易 · 决策虚拟币 · 本机看板已启动              ║");
+    Console.WriteLine($"║  地址   : http://localhost:5000                            ║");
+    Console.WriteLine($"║  数据源 : {options.DataSourceMode,-12}  AI : {options.AiProvider,-10}  初始本金 ${config.InitialCapital:0.00} ║");
+    Console.WriteLine($"║  数据库 : {ResolveDbPath(options)}                         ║");
+    Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
+    Console.WriteLine();
+});
 
 app.Run();
 

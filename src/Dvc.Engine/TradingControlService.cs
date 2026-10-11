@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dvc.Core;
 using Dvc.Core.Events;
+using Dvc.Core.Trading;
 using Dvc.Persistence;
 
 namespace Dvc.Engine;
@@ -74,6 +75,18 @@ public sealed class TradingControlService
     {
         var cfg = _runtime.Snapshot();
         await _configStore.SaveAsync(cfg, ct);
+        PublishTick(cfg);
+        _log.LogInfo($"配置变更[{changed}]：模式={cfg.TradingMode} 范围={cfg.AssetScope} 标的={cfg.ActiveSymbol}");
+    }
+
+    /// <summary>广播当前配置快照（无需落库）。供启动时推送，确保看板 Config 永不为 null（否则盘口等模块显示"等待行情"）。</summary>
+    public void BroadcastCurrentConfig()
+    {
+        PublishTick(_runtime.Snapshot());
+    }
+
+    private void PublishTick(TradingConfig cfg)
+    {
         var tick = new UiConfigTick
         {
             TradingMode = cfg.TradingMode.ToString(),
@@ -86,6 +99,5 @@ public sealed class TradingControlService
             Theme = cfg.Theme,
         };
         _bus.Publish(EngineEventKind.ModeChanged, JsonSerializer.Serialize(tick, DvcJsonContext.Default.UiConfigTick));
-        _log.LogInfo($"配置变更[{changed}]：模式={cfg.TradingMode} 范围={cfg.AssetScope} 标的={cfg.ActiveSymbol}");
     }
 }
