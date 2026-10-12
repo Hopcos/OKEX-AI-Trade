@@ -41,7 +41,7 @@ Live 模式需在配置文件填入 OKX API Key/Secret/Passphrase（见 `appsett
 | 提供方 | 说明 |
 |---|---|
 | `Mock`（默认） | 内置规则引擎：趋势/盘口不平衡/资金流打分，多币种挑选期望值最高者，思考链打字机 |
-| `DeepSeek` | OpenAI 兼容 Chat Completions **流式**：`reasoning`/`reasoning_content` 分片→思考链；最终 JSON 容忍 markdown 围栏提取。已按你提供的内网网关预填：`BaseUrl=http://10.0.5.190:3000/v1`、`Model=MiMo-V2.6-Flash-RL`（网关另有 `Coding`、`Qwen3.8-flash-next` 可选） |
+| `DeepSeek` | OpenAI 兼容 Chat Completions **流式**：`reasoning`/`reasoning_content` 分片→思考链；最终 JSON 容忍 markdown 围栏提取。 |
 | `InternDecision` | POST `{BaseUrl}/v1/decisions` 结构化决策：`state`（盘面/账户文本+完整 JSON 快照）+ 七类问题（choice/score/noul），答案→标准决策 JSON 映射。已预填 `http://localhost:8000` + Bearer Key |
 
 快速切换 LLM 提供方（免改主配置）：
@@ -102,7 +102,7 @@ $env:Trading__AiProvider = "InternDecision"
 
 - 全解决方案 `dotnet build DecisionVirtualCoin.slnx`：**0 警告 0 错误**。
 - 默认 Paper+Mock：决策节拍 ~3.5s/轮，限价买单成交（Filled）、卖单挂单、TTL 120s 自动撤单、亏损唤醒（权益回撤→高优通道）、风控"持仓不足/可用资金不足"拒绝均实测通过。
-- DeepSeek 真模型（MiMo-V2.6-Flash-RL）流式：thinking 打字机 + 决策 JSON 解析 + 挂单执行实测通过（修复了两个网关适配问题：new-api 拒收裸 JSON user 消息；max_tokens 截断致 JSON 不闭合 → 8192 + 精炼思考）。
+- DeepSeek 真模型流式：thinking 打字机 + 决策 JSON 解析 + 挂单执行实测通过（修复了两个网关适配问题：new-api 拒收裸 JSON user 消息；max_tokens 截断致 JSON 不闭合 → 8192 + 精炼思考）。
 - 看板 http://localhost:5000 与 /history 均 200，四表数据实时可见。
 
 ---
