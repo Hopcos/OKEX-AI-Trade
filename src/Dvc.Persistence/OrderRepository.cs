@@ -60,6 +60,29 @@ public sealed class OrderRepository(AppDb db)
         return rows.Select(Unmap).ToList();
     }
 
+    /// <summary>所有有成交量的订单（含"部分成交后撤单"），按时间正序——供预算账本重放。</summary>
+    public async Task<IReadOnlyList<OrderRecord>> ListFilledAsync(CancellationToken ct = default, DateTime? sinceUtc = null)
+    {
+        using var conn = db.Open();
+        var rows = sinceUtc is null
+            ? await conn.QueryAsync<OrderRow>(new CommandDefinition(
+                "SELECT * FROM Trade_Order WHERE FilledBaseAmount > 0 ORDER BY Id ASC", cancellationToken: ct))
+            : await conn.QueryAsync<OrderRow>(new CommandDefinition(
+                "SELECT * FROM Trade_Order WHERE FilledBaseAmount > 0 AND CreatedAtUtc >= @since ORDER BY Id ASC",
+                new { since = SqliteFmt.Iso(sinceUtc.Value.ToUniversalTime()) }, cancellationToken: ct));
+        return rows.Select(Unmap).ToList();
+    }
+
+    /// <summary>各交易对最近一次买入成交时间（UTC）——用来估算持仓时长（止盈目标随持仓变久而下调）。</summary>
+    public async Task<IReadOnlyDictionary<string, DateTime>> LastBuyFillTimesAsync(CancellationToken ct = default)
+    {
+        using var conn = db.Open();
+        var rows = await conn.QueryAsync<(string Symbol, string At)>(new CommandDefinition(
+            "SELECT Symbol, MAX(COALESCE(UpdatedAtUtc, CreatedAtUtc)) AS At FROM Trade_Order " +
+            "WHERE Side='Buy' AND FilledBaseAmount > 0 GROUP BY Symbol", cancellationToken: ct));
+        return rows.ToDictionary(r => r.Symbol, r => SqliteFmt.FromIso(r.At));
+    }
+
     public async Task<IReadOnlyList<OrderRecord>> ListRecentAsync(int limit = 50, CancellationToken ct = default)
     {
         using var conn = db.Open();

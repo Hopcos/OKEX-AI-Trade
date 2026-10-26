@@ -65,12 +65,16 @@ public interface IOrderGateway
     Task<OrderRecord> EmergencyMarketAsync(string symbol, OrderSide side, decimal amountUsd, string reason, CancellationToken ct);
 }
 
-/// <summary>账户镜像（每日初始本金 / 可用 USD / 已买入代币折算价）。</summary>
+/// <summary>
+/// 账户镜像。AvailableUsd = 可自由动用的 USD（已扣除挂单冻结）；EquityUsd = 现金（含冻结）+ 持仓市值；
+/// AvgCosts = 各基础币持仓均价（含买入手续费，供盈亏/保本价计算）；RealizedPnlUsd = 累计已实现盈亏（净手续费）。
+/// </summary>
 public sealed record AccountBalances(
     decimal AvailableUsd,
     IReadOnlyDictionary<string, decimal> Holdings,
     decimal EquityUsd,
-    decimal RealizedPnlUsd = 0m)
+    decimal RealizedPnlUsd = 0m,
+    IReadOnlyDictionary<string, decimal>? AvgCosts = null)
 {
     public static AccountBalances Empty(decimal availableUsd) =>
         new(availableUsd, new Dictionary<string, decimal>(), availableUsd);

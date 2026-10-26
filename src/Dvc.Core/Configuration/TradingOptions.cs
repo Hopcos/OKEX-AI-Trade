@@ -26,7 +26,17 @@ public sealed class TradingOptions
 
     public string ActiveSymbol { get; set; } = "BTC-USDT";
 
+    /// <summary>
+    /// 本金预算（USD）：系统只动用这一笔钱——下单、盈亏、权益、风控上限、熔断线全部按它核算
+    /// （Live 模式下即使交易所账户余额更大，也只在此预算内交易，其余资金视为不存在）。
+    /// </summary>
     public decimal InitialCapital { get; set; } = 20m;
+
+    /// <summary>
+    /// 预算账本起算时间（UTC，仅 Live 生效；空 = 重放库内全部成交）。
+    /// 库里混有旧的 Paper 成交或本金调整前的成交时，设为"从现在起"，账本只统计该时间之后创建的订单。
+    /// </summary>
+    public DateTime? LedgerStartUtc { get; set; }
 
     /// <summary>SQLite 数据库文件路径（可绝对路径；相对路径基于进程工作目录解析）。</summary>
     public string DbPath { get; set; } = "data/trading.db";
@@ -36,8 +46,20 @@ public sealed class TradingOptions
 
     public List<string> Blacklist { get; set; } = ["LUNA", "FTT", "MEME1"];
 
-    /// <summary>盈利阶梯下单比例：单笔最大 = (初始本金 + max(0, 权益-初始本金)) * 20%。</summary>
+    /// <summary>单笔买单上限比例：单笔最大 = 当前总权益（本金 ± 已实现/浮动盈亏）× 该比例；盈利放大、亏损自动缩小。</summary>
     public decimal MaxOrderSizeRatio { get; set; } = 0.20m;
+
+    /// <summary>
+    /// 总仓位上限比例：持仓市值 + 挂买单冻结 ≤ 当前总权益 × 该比例（默认 0.6）。
+    /// 永远保留一部分现金，保证"买入 → 卖出回笼现金 → 再买入"的循环能转起来，而不是一把买满后无事可做。
+    /// </summary>
+    public decimal MaxExposureRatio { get; set; } = 0.60m;
+
+    /// <summary>单笔买单绝对上限（USD，0 = 不启用）：与"权益 × 比例"取较小者，用于给最大下单金额再加一道硬顶。</summary>
+    public decimal MaxOrderUsd { get; set; }
+
+    /// <summary>单边手续费（bps，10 = 0.1%）：Paper 撮合按此扣费；Live 预算账本按此估算；盈利保本价据此计算。</summary>
+    public decimal FeeBps { get; set; } = 10m;
 
     /// <summary>硬熔断阈值：总权益 &lt; 初始本金 * 70% 触发清仓停机。</summary>
     public decimal CircuitBreakerRatio { get; set; } = 0.70m;
@@ -60,6 +82,109 @@ public sealed class TradingOptions
     public DeepSeekOptions DeepSeek { get; set; } = new();
 
     public InternDecisionOptions InternDecision { get; set; } = new();
+
+    public ProfitOptions Profit { get; set; } = new();
+
+    public BrainOptions Brain { get; set; } = new();
+}
+
+/// <summary>盈利护栏：保证"卖出必须净盈利"，除非触发止损（系统永远朝着盈利的方向）。</summary>
+public sealed class ProfitOptions
+{
+    /// <summary>是否启用卖出盈利护栏（默认启用）。关闭后 AI 可以在任意价位认赔卖出。</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>卖出价必须覆盖 持仓成本 + 卖出手续费 + 该净利润（bps，15 = 0.15%）；未达到则继续持有等待。</summary>
+    public decimal MinNetProfitBps { get; set; } = 15m;
+
+    /// <summary>止损线（%）：持仓浮亏达到该比例时允许认赔卖出（放行护栏），避免无限死扛。</summary>
+    public decimal StopLossPercent { get; set; } = 3m;
+
+    /// <summary>
+    /// 自动离场（持仓管家，默认启用）：独立于 AI 的 2 秒巡检——每个持仓必有退出计划：
+    /// 买一 ≥ 保本价立即止盈落袋；否则在保本价挂止盈卖单等待；浮亏触及止损线则止损离场。
+    /// </summary>
+    public bool AutoExit { get; set; } = true;
+
+    /// <summary>止盈/卖单的有效期（秒，默认 600）。卖单是回笼现金的关键，比买单（OrderTtlSeconds）活得更久。</summary>
+    public int SellOrderTtlSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// 空转兜底（分钟，默认 3，0 = 关闭）：空仓且连续这么久没有下过任何单（AI 一直 hold）时，
+    /// 即使 InternDecision 说观望，也按小仓位挂一笔试单买入，把"买→持仓管家挂保本卖单→成交回笼"的循环转起来。
+    /// 不交易就没有收益；试单仍受单笔上限/总仓位/风控/价差限制，且大脑硬止血时不触发。
+    /// </summary>
+    public int IdleProbeMinutes { get; set; } = 3;
+
+    /// <summary>
+    /// 空转试单允许的最大价差（bps，默认 8）：试单直接吃卖一价（保证入场），价差就是成本，
+    /// 价差过宽的币种不试单。
+    /// </summary>
+    public decimal IdleProbeMaxSpreadBps { get; set; } = 8m;
+
+    /// <summary>
+    /// 止盈目标衰减时长（分钟，默认 30，0 = 不衰减）：持仓越久，要求的净利润越低，
+    /// 这么久之后降到 <see cref="MinNetProfitFloorBps"/>。避免一笔仓位占着额度干等够不到的目标价而没有周转。
+    /// </summary>
+    public int TargetDecayMinutes { get; set; } = 30;
+
+    /// <summary>止盈目标衰减到底的净利润（bps，默认 2）：仍保证扣完双边手续费后不亏钱。</summary>
+    public decimal MinNetProfitFloorBps { get; set; } = 2m;
+
+    /// <summary>
+    /// 空转试单允许同时持有的最大仓位数（币种数，默认 3）：已持有一个币、又空转时，
+    /// 会在候选池里再挑一个价差窄、无持仓的币小仓位试单，多路并行周转；达到上限后不再试。
+    /// </summary>
+    public int MaxOpenPositions { get; set; } = 3;
+}
+
+/// <summary>
+/// 大脑（LLM）复盘配置：InternDecision 模式下，由 LLM 定期/在关键阶段复盘战绩，
+/// 产出"策略指引"（风险上限/是否允许新买/保本利润/止损线/文字指引）约束并调教 InternDecision。
+/// 连接信息留空则复用 <see cref="DeepSeekOptions"/>；LLM 不可用时自动退回规则复盘。
+/// </summary>
+public sealed class BrainOptions
+{
+    /// <summary>是否启用大脑复盘（默认启用；仅在实际决策提供方为 InternDecision 时生效）。</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>定期复盘间隔（分钟）。</summary>
+    public int ReviewIntervalMinutes { get; set; } = 20;
+
+    /// <summary>关键阶段（启动 / 每小时宏观 / 亏损事件）是否同步触发复盘。</summary>
+    public bool ReviewOnKeyEvents { get; set; } = true;
+
+    /// <summary>两次复盘的最小间隔（秒），防止亏损事件密集时刷爆 LLM。</summary>
+    public int MinReviewIntervalSeconds { get; set; } = 60;
+
+    /// <summary>复盘时回看的最近订单条数。</summary>
+    public int LookbackOrders { get; set; } = 40;
+
+    /// <summary>指引有效期（分钟）：超期未刷新的指引视为过期，InternDecision 退回默认行为。</summary>
+    public int DirectiveTtlMinutes { get; set; } = 60;
+
+    /// <summary>单次复盘 LLM 超时（秒）。关键阶段复盘会阻塞决策至多这么久。</summary>
+    public int TimeoutSeconds { get; set; } = 45;
+
+    /// <summary>
+    /// 风险档位下限（默认 0.5）：LLM 再保守，Max_Risk_Ratio 也不会被压到该值以下（规则复盘本身判定防守/保本时除外）。
+    /// 防止大脑把下单额压到几乎为 0，导致"永远不交易 = 永远零收益"。
+    /// </summary>
+    public decimal MinRiskRatio { get; set; } = 0.5m;
+
+    /// <summary>LLM 可在规则保本利润之上额外加码的上限（bps，默认 10）：保本利润要求过高会让卖单永远挂不出去。</summary>
+    public decimal MaxExtraProfitBps { get; set; } = 5m;
+
+    public double Temperature { get; set; } = 0.3;
+
+    /// <summary>大脑 LLM 的 BaseUrl（OpenAI 兼容）；留空复用 DeepSeek:BaseUrl。</summary>
+    public string BaseUrl { get; set; } = "";
+
+    /// <summary>大脑 LLM 的 ApiKey；留空复用 DeepSeek:ApiKey。</summary>
+    public string ApiKey { get; set; } = "";
+
+    /// <summary>大脑 LLM 的模型名；留空复用 DeepSeek:Model。</summary>
+    public string Model { get; set; } = "";
 }
 
 /// <summary>Paper 模拟行情参数。</summary>

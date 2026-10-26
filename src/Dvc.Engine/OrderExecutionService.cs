@@ -70,6 +70,19 @@ public sealed class OrderExecutionService : BackgroundService
     {
         _gateway.OrderFilled += OnGatewayFill;
 
+        try
+        {
+            await RehydrateOpenOrdersAsync(stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError("启动时恢复未成交订单失败: " + ex.Message, ex);
+        }
+
         var reconcileTimer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         var commandTask = CommandLoopAsync(stoppingToken);
         var reconcileTask = ReconcileLoopAsync(reconcileTimer, stoppingToken);
@@ -80,6 +93,77 @@ public sealed class OrderExecutionService : BackgroundService
         catch (OperationCanceledException)
         {
             // 正常停机
+        }
+    }
+
+    /// <summary>
+    /// 启动时恢复库里"未成交"的订单：跟踪表只存在内存里，重启后丢失的订单就再也没人对账/超时撤单——
+    /// 卖单会一直挂在交易所、占着仓位，成交了系统也不知道。
+    /// Paper：模拟盘挂单在内存，重启即消失 → 全部标记撤销；
+    /// Live：没有交易所订单号的（Paper 时代遗留/从未到达交易所）标记撤销；有订单号的向交易所查最新状态，
+    ///       已结束则落库（成交走成交流程），仍挂着则重新纳入跟踪（超过 TTL 的会在首轮对账被撤）。
+    /// </summary>
+    private async Task RehydrateOpenOrdersAsync(CancellationToken ct)
+    {
+        var open = await _orders.GetOpenAsync(null, ct);
+        var restored = 0;
+        var dropped = 0;
+        foreach (var o in open)
+        {
+            if (o.ClientOrderId.StartsWith('E'))
+            {
+                continue; // 紧急市价单：入库状态不代表挂单，不在此处理
+            }
+
+            var live = _options.DataSourceMode == DataSourceMode.Live;
+            if (!live || string.IsNullOrEmpty(o.ExchangeOrderId))
+            {
+                o.Status = OrderStatus.Cancelled;
+                o.UpdatedAtUtc = DateTime.UtcNow;
+                await _orders.UpdateAsync(o, ct);
+                dropped++;
+                continue;
+            }
+
+            OrderRecord? latest = null;
+            try
+            {
+                latest = await _gateway.GetOrderAsync(o.ClientOrderId, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarn($"恢复订单 {o.ClientOrderId} 查询失败，先纳入跟踪稍后对账: {ex.Message}");
+            }
+
+            if (latest is not null)
+            {
+                Merge(o, latest);
+                await _orders.UpdateAsync(o, ct);
+            }
+
+            if (o.Status is OrderStatus.Filled or OrderStatus.Cancelled)
+            {
+                PublishOrder(o, o.Status == OrderStatus.Filled ? "成交" : "撤单");
+                if (o.Status == OrderStatus.Filled)
+                {
+                    await OnFillAsync(o, ct);
+                }
+
+                dropped++;
+                continue;
+            }
+
+            lock (_tracked)
+            {
+                _tracked[o.ClientOrderId] = o;
+            }
+
+            restored++;
+        }
+
+        if (open.Count > 0)
+        {
+            PublishFlow($"♻ 启动恢复未成交订单：重新跟踪 {restored} 笔，清理失效/已结束 {dropped} 笔");
         }
     }
 
@@ -135,13 +219,16 @@ public sealed class OrderExecutionService : BackgroundService
                 var amountUsd = cmd.AmountUsd;
                 if (cmd.Side == OrderSide.Sell && amountUsd > 0m)
                 {
-                    var balances = await _gateway.GetBalancesAsync(ct);
+                    // 取"预算账户"持仓（Live 下只含本系统买入的部分，不会误卖账户里其它币）；强制刷新避免成交后读到旧值
+                    var balances = await _account.RefreshAsync(ct, forceRefresh: true);
                     if (balances.Holdings.TryGetValue(RiskEngine.BaseOf(cmd.Symbol), out var held) && held > 0m)
                     {
                         var cap = held * cmd.Price;
                         if (amountUsd > cap)
                         {
-                            amountUsd = Math.Max(0m, Math.Round(cap * 0.9999m, 8, MidpointRounding.ToZero));
+                            // Paper：精确卖空持仓（不留尘埃）；Live：留 0.01% 余量吸收交易所精度/手续费取整
+                            var factor = _options.DataSourceMode == DataSourceMode.Live ? 0.9999m : 1m;
+                            amountUsd = Math.Max(0m, Math.Round(cap * factor, 8, MidpointRounding.ToZero));
                         }
                     }
                 }
@@ -283,7 +370,9 @@ public sealed class OrderExecutionService : BackgroundService
                 try
                 {
                     // TTL 超时：自动撤销并回唤醒 AI 重新评估
-                    var ttl = TimeSpan.FromSeconds(Math.Max(15, _options.OrderTtlSeconds));
+                    // 卖单（止盈回笼现金）比买单活得更久
+                    var ttl = TimeSpan.FromSeconds(Math.Max(15,
+                        p.Side == OrderSide.Sell ? _options.Profit.SellOrderTtlSeconds : _options.OrderTtlSeconds));
                     if (DateTime.UtcNow - p.CreatedAtUtc > ttl && p.Status == OrderStatus.Pending)
                     {
                         await _gateway.CancelAsync(p.ClientOrderId, ct);
@@ -292,14 +381,36 @@ public sealed class OrderExecutionService : BackgroundService
                             _tracked.Remove(p.ClientOrderId);
                         }
 
-                        await UpdateDbStatusAsync(p.ClientOrderId, OrderStatus.Cancelled, ct);
-                        PublishFlow($"挂单超时自动撤销：{p.ClientOrderId}（TTL {ttl.TotalSeconds:0}s）");
+                        // 撤单前后可能已有（部分）成交：以交易所最终状态为准，否则账本会漏记成交、把已成交的单误记为撤销
+                        var after = await _gateway.GetOrderAsync(p.ClientOrderId, ct);
+                        if (after is not null && after.FilledBaseAmount > p.FilledBaseAmount)
+                        {
+                            p.FilledBaseAmount = after.FilledBaseAmount;
+                            p.FilledAvgPrice = after.FilledAvgPrice;
+                        }
+
+                        if (after?.Status == OrderStatus.Filled)
+                        {
+                            var done = Merge(p, after);
+                            await _orders.UpdateAsync(done, ct);
+                            PublishOrder(done, "成交");
+                            await OnFillAsync(done, ct);
+                            continue;
+                        }
+
+                        p.Status = OrderStatus.Cancelled;
+                        p.UpdatedAtUtc = DateTime.UtcNow;
+                        await _orders.UpdateAsync(p, ct);
+                        PublishOrder(p, "撤单");
+                        PublishFlow($"挂单超时自动撤销：{p.ClientOrderId}（TTL {ttl.TotalSeconds:0}s）" +
+                                    (p.FilledBaseAmount > 0m ? $"，已部分成交 {p.FilledBaseAmount}" : ""));
                         _runtime.WakeLow(DecisionTrigger.StrategyTick, "ORDER_TIMEOUT");
                         continue;
                     }
 
                     var latest = await _gateway.GetOrderAsync(p.ClientOrderId, ct);
-                    if (latest is null || latest.Status == p.Status)
+                    // 状态没变且成交量也没变才跳过（OKX 部分成交仍是 Pending，成交量变化也要落库）
+                    if (latest is null || (latest.Status == p.Status && latest.FilledBaseAmount == p.FilledBaseAmount))
                     {
                         continue;
                     }
@@ -355,7 +466,20 @@ public sealed class OrderExecutionService : BackgroundService
 
     private async Task OnFillAsync(OrderRecord filled, CancellationToken ct)
     {
-        var state = await _account.RefreshAsync(ct);
+        // Live：OKX 不回传已实现盈亏 → 用预算账本补算并落库，亏损唤醒/复盘统计才有真实数据
+        if (_options.DataSourceMode == DataSourceMode.Live && filled.Side == OrderSide.Sell &&
+            filled.RealizedPnl == 0m && filled.Id > 0)
+        {
+            var pnl = await _account.ComputeSellRealizedAsync(filled.Id, ct);
+            if (pnl is { } realized)
+            {
+                filled.RealizedPnl = Math.Round(realized, 6);
+                await _orders.UpdateAsync(filled, ct);
+                PublishOrder(filled, "成交");
+            }
+        }
+
+        var state = await _account.RefreshAsync(ct, forceRefresh: true);
         var cfg = _runtime.Snapshot();
 
         // 亏损事件紧急唤醒（最高优先级）：主动认赔卖出 或 权益回撤

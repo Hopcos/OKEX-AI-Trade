@@ -1,5 +1,6 @@
 using Dvc.Core;
 using Dvc.Core.Ai;
+using Dvc.Core.Configuration;
 using Dvc.Core.Market;
 using Dvc.Core.Trading;
 
@@ -17,7 +18,10 @@ public static class AiInputBuilder
         AccountState account,
         MarketContext active,
         IReadOnlyList<MarketContext>? candidates,
-        decimal lastLoss)
+        decimal lastLoss,
+        TradingOptions options,
+        BrainDirective? directive = null,
+        decimal idleMinutes = 0m)
     {
         var triggerName = trigger switch
         {
@@ -33,6 +37,12 @@ public static class AiInputBuilder
             Ask1To5 = active.BestAsk > 0 ? ToLevels(active, isBid: false) : [],
         };
 
+        var baseCcy = RiskEngine.BaseOf(active.Symbol);
+        var avgCost = account.AvgCosts.TryGetValue(baseCcy, out var ac) ? ac : 0m;
+        var heldMinutes = account.PositionAgeMinutes.TryGetValue(baseCcy, out var hm) ? hm : 0m;
+        var minNet = ProfitPolicy.MinNetProfitBps(options, directive, heldMinutes);
+        var committed = account.CommittedUsd;
+
         var input = new AiInputSnapshot
         {
             TriggerReason = triggerName,
@@ -47,6 +57,29 @@ public static class AiInputBuilder
                 LastTradeLossAmount = Math.Round(lastLoss, 2),
                 PositionBaseQty = account.Holdings.TryGetValue(RiskEngine.BaseOf(active.Symbol), out var qty) ? qty : 0m,
                 RealizedPnl = Math.Round(account.RealizedPnl, 2),
+                PositionAvgCost = Math.Round(avgCost, 6),
+                PositionMinProfitSellPrice = avgCost > 0m
+                    ? Math.Round(ProfitPolicy.MinProfitSellPrice(avgCost, options.FeeBps, minNet), 6)
+                    : 0m,
+                UnrealizedPnl = Math.Round(account.UnrealizedPnl, 4),
+                CommittedUsd = Math.Round(committed, 2),
+                ExposurePercent = account.EquityUsd > 0m ? Math.Round(committed / account.EquityUsd * 100m, 1) : 0m,
+                MaxExposurePercent = Math.Round(Math.Max(options.MaxExposureRatio, options.MaxOrderSizeRatio) * 100m, 1),
+                BuyRoomUsd = RiskEngine.BuyRoom(account.EquityUsd, account.AvailableUsd, options, account.CommittedUsd),
+                PositionSellableNow = avgCost > 0m && active.BestBid > 0m &&
+                                      active.BestBid >= ProfitPolicy.MinProfitSellPrice(avgCost, options.FeeBps, minNet),
+                PositionUnrealizedPercent = avgCost > 0m && active.LastPrice > 0m
+                    ? Math.Round((active.LastPrice - avgCost) / avgCost * 100m, 3)
+                    : 0m,
+                IdleMinutes = Math.Round(idleMinutes, 1),
+                IdleProbeAfterMinutes = options.Profit.Enabled ? Math.Max(0, options.Profit.IdleProbeMinutes) : 0m,
+                IdleProbeMaxSpreadBps = options.Profit.IdleProbeMaxSpreadBps,
+                HeldSymbols = account.LastPrices
+                    .Where(kv => account.Holdings.TryGetValue(RiskEngine.BaseOf(kv.Key), out var q) && q * kv.Value >= 1m)
+                    .Select(kv => kv.Key)
+                    .ToList(),
+                MaxOpenPositions = Math.Max(1, options.Profit.MaxOpenPositions),
+                PositionHeldMinutes = Math.Round(heldMinutes, 1),
             },
             CurrentConfig = new AiCurrentConfig
             {
@@ -66,7 +99,9 @@ public static class AiInputBuilder
             },
         };
 
-        if (config.AssetScope == AssetScope.MultiPair && candidates is { Count: > 0 })
+        input.BrainDirective = directive;
+
+        if (candidates is { Count: > 0 })
         {
             input.PairSnapshots = candidates
                 .Select(c => new AiPairSnapshot

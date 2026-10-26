@@ -34,16 +34,18 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
     private decimal _availableUsd;
     private readonly Dictionary<string, Holding> _holdings = [];
     private decimal _realizedPnl;
+    private readonly decimal _feeRate;
 
     // ---- 挂单簿 ----
     private readonly List<OrderRecord> _openOrders = [];
     private readonly ConcurrentDictionary<string, OrderRecord> _history = new();
 
-    public SimulationMarket(string[] symbols, SimulationOptions sim, decimal initialCapital)
+    public SimulationMarket(string[] symbols, SimulationOptions sim, decimal initialCapital, decimal feeBps = 0m)
     {
         _symbols = symbols.Length == 0 ? ["BTC-USDT"] : symbols;
         _sim = sim;
         _availableUsd = initialCapital;
+        _feeRate = Math.Max(0m, feeBps) / 10000m;
         var basePriceOf = DefaultPricing.ToDictionary(p => p.Symbol, p => p.BasePrice);
         foreach (var s in _symbols)
         {
@@ -238,6 +240,17 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
                 }
 
                 _openOrders.RemoveAt(i);
+
+                // 卖单成交前持仓已被紧急清仓等路径卖空：撤销该单，绝不凭空造现金
+                if (!o.IsBuy && (!_holdings.TryGetValue(o.Symbol, out var held) || held.Quantity + 0.00000001m < o.BaseAmount))
+                {
+                    o.Status = OrderStatus.Cancelled;
+                    o.Reason += " | 持仓已不足，撮合前撤销";
+                    o.UpdatedAtUtc = now;
+                    _history[o.ClientOrderId] = o;
+                    continue;
+                }
+
                 ApplyFill(o, fillPrice);
                 o.Status = OrderStatus.Filled;
                 o.FilledBaseAmount = o.BaseAmount;
@@ -249,11 +262,16 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
         }
     }
 
+    /// <summary>
+    /// 成交记账：买入成本含手续费（计入持仓均价），卖出净得 = 成交额 − 手续费；
+    /// 已实现盈亏 = 卖出净得 − 卖出数量 × 持仓均价（即净手续费的真实盈亏）。
+    /// </summary>
     private void ApplyFill(OrderRecord o, decimal fillPrice)
     {
         if (o.IsBuy)
         {
-            var cost = o.BaseAmount * fillPrice;
+            var gross = o.BaseAmount * fillPrice;
+            var cost = gross * (1m + _feeRate);
             _availableUsd -= cost;
             if (_holdings.TryGetValue(o.Symbol, out var h))
             {
@@ -264,16 +282,16 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
             }
             else
             {
-                _holdings[o.Symbol] = new Holding { Quantity = o.BaseAmount, AvgCost = fillPrice };
+                _holdings[o.Symbol] = new Holding { Quantity = o.BaseAmount, AvgCost = cost / o.BaseAmount };
             }
         }
         else
         {
-            var proceeds = o.BaseAmount * fillPrice;
+            var proceeds = o.BaseAmount * fillPrice * (1m - _feeRate);
             _availableUsd += proceeds;
             if (_holdings.TryGetValue(o.Symbol, out var h))
             {
-                var realized = (fillPrice - h.AvgCost) * o.BaseAmount;
+                var realized = proceeds - o.BaseAmount * h.AvgCost;
                 _realizedPnl += realized;
                 o.RealizedPnl = realized;
                 h.Quantity -= o.BaseAmount;
@@ -284,6 +302,14 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
             }
         }
     }
+
+    /// <summary>挂单冻结的 USD（买单按"挂单价 × 数量 × (1+费率)"冻结），防止多笔挂单合计超出本金。</summary>
+    private decimal ReservedBuyUsd() =>
+        _openOrders.Where(x => x.IsBuy).Sum(x => x.BaseAmount * x.Price * (1m + _feeRate));
+
+    /// <summary>挂单冻结的持仓数量（防止同一份持仓被多笔卖单重复挂出）。</summary>
+    private decimal ReservedSellQty(string symbol) =>
+        _openOrders.Where(x => !x.IsBuy && x.Symbol == symbol).Sum(x => x.BaseAmount);
 
     private void OnOrderFilledSafe(OrderRecord o)
     {
@@ -341,17 +367,17 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
                 CreatedAtUtc = DateTime.UtcNow,
             };
 
-            if (side == OrderSide.Buy && amountUsd > _availableUsd + 0.000001m)
+            if (side == OrderSide.Buy && baseAmount * price * (1m + _feeRate) > _availableUsd - ReservedBuyUsd() + 0.000001m)
             {
                 o.Status = OrderStatus.Rejected;
-                o.Reason += " | 可用USD不足";
+                o.Reason += " | 可用USD不足（含挂单冻结与手续费）";
                 _history[o.ClientOrderId] = o;
                 return Task.FromResult(o);
             }
 
             if (side == OrderSide.Sell)
             {
-                var hold = _holdings.TryGetValue(symbol, out var h) ? h.Quantity : 0m;
+                var hold = (_holdings.TryGetValue(symbol, out var h) ? h.Quantity : 0m) - ReservedSellQty(symbol);
                 if (baseAmount > hold + 0.00000001m)
                 {
                     o.Status = OrderStatus.Rejected;
@@ -391,6 +417,7 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
         {
             // 持仓统一返回 基础币 键（与 Live/OKX 网关口径一致，熔断清仓按基础币遍历）
             var holdings = new Dictionary<string, decimal>();
+            var avgCosts = new Dictionary<string, decimal>();
             var valuation = 0m;
             foreach (var (sym, h) in _holdings)
             {
@@ -402,11 +429,14 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
                 var dash = sym.IndexOf('-');
                 var baseCcy = dash > 0 ? sym[..dash] : sym;
                 holdings[baseCcy] = h.Quantity;
+                avgCosts[baseCcy] = h.AvgCost;
                 valuation += h.Quantity * GetLastPrice(sym);
             }
 
+            // 可用 = 现金 − 挂单冻结（可自由动用部分）；权益 = 现金（含冻结）+ 持仓市值
+            var free = Math.Max(0m, _availableUsd - ReservedBuyUsd());
             return Task.FromResult(new AccountBalances(
-                Math.Max(0m, _availableUsd), holdings, _availableUsd + valuation, _realizedPnl));
+                free, holdings, _availableUsd + valuation, _realizedPnl, avgCosts));
         }
     }
 

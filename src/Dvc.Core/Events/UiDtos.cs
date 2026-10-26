@@ -58,6 +58,9 @@ public sealed class UiAccountTick
     [JsonPropertyName("realizedPnl")]
     public decimal RealizedPnl { get; set; }
 
+    [JsonPropertyName("unrealizedPnl")]
+    public decimal UnrealizedPnl { get; set; }
+
     [JsonPropertyName("maxOrderSize")]
     public decimal MaxOrderSize { get; set; }
 

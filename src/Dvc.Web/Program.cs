@@ -118,7 +118,7 @@ builder.Services.AddSingleton<TradingControlService>();
 if (options.DataSourceMode == DataSourceMode.Paper)
 {
     var symbols = options.DefaultAssetScope == AssetScope.MultiPair ? options.WatchSymbols : [options.ActiveSymbol];
-    var sim = new SimulationMarket([.. symbols], options.Simulation, config.InitialCapital);
+    var sim = new SimulationMarket([.. symbols], options.Simulation, config.InitialCapital, options.FeeBps);
     builder.Services.AddSingleton<IMarketDataFeed>(sim);
     builder.Services.AddSingleton<IOrderGateway>(sim);
 }
@@ -134,6 +134,8 @@ else
 builder.Services.AddSingleton<MockStrategyAi>();
 builder.Services.AddSingleton(sp => new DeepSeekStrategyAi(options.DeepSeek, new HttpClient()));
 builder.Services.AddSingleton(sp => new Dvc.Ai.InternDecision.InternDecisionStrategyAi(options.InternDecision, new HttpClient()));
+// 大脑（LLM 复盘 + 调教 InternDecision）：连接信息留空时复用 DeepSeek 配置
+builder.Services.AddSingleton(sp => new Dvc.Ai.Brain.BrainLlmClient(options.Brain, options.DeepSeek, new HttpClient()));
 builder.Services.AddSingleton<Func<AiProvider, IStrategyAi>>(sp =>
 {
     var mock = sp.GetRequiredService<MockStrategyAi>();
@@ -150,12 +152,16 @@ builder.Services.AddSingleton<Func<AiProvider, IStrategyAi>>(sp =>
 // ============ 引擎管道（三管道物理隔离 + 风控巡检 + Hub 转发） ============
 builder.Services.AddSingleton<AccountService>();
 builder.Services.AddSingleton<OrderExecutionService>();
+builder.Services.AddSingleton<BrainService>();
+builder.Services.AddSingleton<PositionManagerService>();
 builder.Services.AddSingleton<DecisionOrchestratorService>();
 builder.Services.AddSingleton<MarketIngestionService>();
 builder.Services.AddSingleton<RiskMonitorService>();
 builder.Services.AddSingleton<HubForwarderService>();
 
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OrderExecutionService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BrainService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionManagerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DecisionOrchestratorService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketIngestionService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RiskMonitorService>());
@@ -190,24 +196,30 @@ if (options.DataSourceMode == DataSourceMode.Live)
     {
         var gateway = app.Services.GetRequiredService<IOrderGateway>();
         var bal = await gateway.GetBalancesAsync(app.Lifetime.ApplicationStopping);
-        var diffRatio = options.InitialCapital > 0m
-            ? Math.Abs(bal.EquityUsd - options.InitialCapital) / options.InitialCapital
-            : 1m;
-        if (diffRatio > 0.2m)
+        // 本金预算模型：系统只动用 InitialCapital 这一笔钱（预算账本隔离），交易所账户更大没关系，
+        // 但可用 USDT 必须足够覆盖预算，否则预算根本买不起。
+        if (bal.AvailableUsd + 0.01m < options.InitialCapital)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine(
-                $"[启动自检] ⚠ 风控基准 InitialCapital=${options.InitialCapital:0.00} 与 OKX 实际权益 ${bal.EquityUsd:0.00} 偏差 {diffRatio:P0}——" +
-                $"熔断线(×{options.CircuitBreakerRatio:P0})与单笔上限(×{options.MaxOrderSizeRatio:P0})均按前者计算，请对齐！");
+                $"[启动自检] ⚠ 交易所可用 USDT ${bal.AvailableUsd:0.00} 少于本金预算 InitialCapital=${options.InitialCapital:0.00}——" +
+                "预算无法完全动用（实际可用额度按交易所可用余额收敛），请充值或下调 InitialCapital。");
             Console.ResetColor();
         }
+        else if (bal.EquityUsd > options.InitialCapital * 1.5m)
+        {
+            Console.WriteLine(
+                $"[启动自检] 交易所账户权益 ${bal.EquityUsd:0.00} 大于本金预算 ${options.InitialCapital:0.00}：" +
+                "系统只会在预算内下单并只按预算核算盈亏，其余资金不会被动用。");
+        }
 
-        if (options.InitialCapital < 100m)
+        var firstMax = RiskEngine.MaxOrderSize(options.InitialCapital, options.MaxOrderSizeRatio, options.MaxOrderUsd);
+        if (firstMax < 10m)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine(
-                $"[启动自检] ⚠ InitialCapital=${options.InitialCapital:0.00} < $100：单笔上限=" +
-                $"${RiskEngine.MaxOrderSize(options.InitialCapital, bal.EquityUsd, options.MaxOrderSizeRatio):0.00} 可能低于 OKX 现货最小下单名义金额（约 $10），订单会被拒");
+                $"[启动自检] ⚠ 本金 ${options.InitialCapital:0.00} 下单笔上限=${firstMax:0.00}，可能低于 OKX 现货最小下单名义金额（约 $10），订单会被交易所拒绝；" +
+                "可调大 InitialCapital / MaxOrderSizeRatio。");
             Console.ResetColor();
         }
 

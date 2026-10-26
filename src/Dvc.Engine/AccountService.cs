@@ -15,6 +15,9 @@ public sealed class AccountState
     /// <summary>单笔上限比例（跟随 Trading:MaxOrderSizeRatio 配置，默认 20%）。</summary>
     public decimal MaxOrderSizeRatio { get; init; } = 0.20m;
 
+    /// <summary>单笔绝对上限（Trading:MaxOrderUsd，0 = 不启用）。</summary>
+    public decimal MaxOrderUsd { get; init; }
+
     public decimal AvailableUsd { get; init; }
 
     public decimal EquityUsd { get; init; }
@@ -25,9 +28,44 @@ public sealed class AccountState
 
     public IReadOnlyDictionary<string, decimal> LastPrices { get; init; } = new Dictionary<string, decimal>();
 
+    /// <summary>各基础币持仓均价（含买入手续费）。</summary>
+    public IReadOnlyDictionary<string, decimal> AvgCosts { get; init; } = new Dictionary<string, decimal>();
+
+    /// <summary>各基础币已持有多少分钟（距最近一次买入成交；未知则缺省）——止盈目标随持仓变久而下调。</summary>
+    public IReadOnlyDictionary<string, decimal> PositionAgeMinutes { get; init; } = new Dictionary<string, decimal>();
+
+    /// <summary>累计盈亏 = 当前总权益 − 本金预算（已实现 + 浮动，均已净手续费）。</summary>
     public decimal AccumulatedProfit => EquityUsd - InitialCapital;
 
-    public decimal MaxOrderSize => RiskEngine.MaxOrderSize(InitialCapital, EquityUsd, MaxOrderSizeRatio);
+    /// <summary>持仓浮动盈亏（按最新价 − 含费均价）。</summary>
+    public decimal UnrealizedPnl
+    {
+        get
+        {
+            var total = 0m;
+            foreach (var (sym, px) in LastPrices)
+            {
+                var b = RiskEngine.BaseOf(sym);
+                if (Holdings.TryGetValue(b, out var qty) && AvgCosts.TryGetValue(b, out var avg))
+                {
+                    total += (px - avg) * qty;
+                }
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>
+    /// Live 预算账本给出的"真实已占用"（持仓市值 + 挂买单冻结）；null = 用 权益 − 可用现金 推算（Paper 下二者等价）。
+    /// 不能在 Live 一律用"权益 − 可用"：交易所真实 USDT 少于预算时，那段差额不是持仓，误当成已占用会让仓位永远"已满"、一笔都不买。
+    /// </summary>
+    public decimal? CommittedOverride { get; init; }
+
+    /// <summary>已占用资金（持仓市值 + 挂买单冻结，USD）。</summary>
+    public decimal CommittedUsd => CommittedOverride ?? Math.Max(0m, EquityUsd - AvailableUsd);
+
+    public decimal MaxOrderSize => RiskEngine.MaxOrderSize(EquityUsd, MaxOrderSizeRatio, MaxOrderUsd);
 
     public decimal LastSettlementEquity { get; init; }
 }
@@ -39,6 +77,7 @@ public sealed class AccountState
 public sealed class AccountService
 {
     private readonly IOrderGateway _gateway;
+    private readonly OrderRepository _orders;
     private readonly SettlementRepository _settlements;
     private readonly TradingConfigStore _configStore;
     private readonly RuntimeState _runtime;
@@ -54,6 +93,7 @@ public sealed class AccountService
 
     public AccountService(
         IOrderGateway gateway,
+        OrderRepository orders,
         SettlementRepository settlements,
         TradingConfigStore configStore,
         RuntimeState runtime,
@@ -63,6 +103,7 @@ public sealed class AccountService
         Dvc.Core.Configuration.TradingOptions options)
     {
         _gateway = gateway;
+        _orders = orders;
         _settlements = settlements;
         _configStore = configStore;
         _runtime = runtime;
@@ -78,6 +119,7 @@ public sealed class AccountService
             EquityUsd = cfg.InitialCapital,
             LastSettlementEquity = cfg.LastSettlementEquity,
             MaxOrderSizeRatio = _options.MaxOrderSizeRatio,
+            MaxOrderUsd = _options.MaxOrderUsd,
         };
     }
 
@@ -128,6 +170,14 @@ public sealed class AccountService
                 return _current;
             }
 
+            // Live：交易所账户可能远大于本金预算 → 用预算账本折算"这笔钱"的现金/持仓/盈亏；
+            // Paper：纸面账户本身就只有本金预算，直接采用。
+            decimal? committed = null;
+            if (_options.DataSourceMode == Dvc.Core.DataSourceMode.Live && bal.EquityUsd > 0m)
+            {
+                (bal, committed) = await ApplyBudgetLedgerAsync(bal, cfg, ct);
+            }
+
             var lastPrices = new Dictionary<string, decimal>();
             foreach (var sym in bal.Holdings.Keys)
             {
@@ -142,16 +192,34 @@ public sealed class AccountService
                 }
             }
 
+            var ages = new Dictionary<string, decimal>();
+            if (bal.Holdings.Count > 0)
+            {
+                var buyTimes = await _orders.LastBuyFillTimesAsync(ct);
+                foreach (var baseCcy in bal.Holdings.Keys)
+                {
+                    var instId = FindInstId(cfg, baseCcy);
+                    if (instId is not null && buyTimes.TryGetValue(instId, out var at))
+                    {
+                        ages[baseCcy] = Math.Max(0m, (decimal)(now - at).TotalMinutes);
+                    }
+                }
+            }
+
             var state = new AccountState
             {
+                PositionAgeMinutes = ages,
                 InitialCapital = cfg.InitialCapital,
                 AvailableUsd = Math.Round(bal.AvailableUsd, 2),
                 EquityUsd = bal.EquityUsd > 0 ? Math.Round(bal.EquityUsd, 2) : Math.Round(bal.AvailableUsd, 2),
                 RealizedPnl = bal.RealizedPnlUsd,
                 Holdings = bal.Holdings,
+                AvgCosts = bal.AvgCosts ?? new Dictionary<string, decimal>(),
                 LastPrices = lastPrices,
                 LastSettlementEquity = cfg.LastSettlementEquity,
                 MaxOrderSizeRatio = _options.MaxOrderSizeRatio,
+                MaxOrderUsd = _options.MaxOrderUsd,
+                CommittedOverride = committed,
             };
 
             lock (this)
@@ -178,6 +246,17 @@ public sealed class AccountService
         {
             _refreshLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Live 模式：交易所不回传逐笔已实现盈亏，由预算账本重放得出某笔卖单的净盈亏（含手续费估算）。
+    /// 找不到（非本账本内的卖单）返回 null。
+    /// </summary>
+    public async Task<decimal?> ComputeSellRealizedAsync(long orderId, CancellationToken ct = default)
+    {
+        var cfg = _runtime.Snapshot();
+        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, _options.FeeBps / 10000m);
+        return view.SellRealizedByOrderId.TryGetValue(orderId, out var pnl) ? pnl : null;
     }
 
     /// <summary>立即向看板推送一次账户快照（盾牌拦截计数变更后调用）。</summary>
@@ -227,6 +306,7 @@ public sealed class AccountService
             EquityUsd = state.EquityUsd,
             AccumulatedProfit = Math.Round(state.AccumulatedProfit, 2),
             RealizedPnl = Math.Round(state.RealizedPnl, 2),
+            UnrealizedPnl = Math.Round(state.UnrealizedPnl, 2),
             MaxOrderSize = state.MaxOrderSize,
             MaxOrderSizeRatio = state.MaxOrderSizeRatio,
             ShieldCount = cfg.ShieldCount,
@@ -235,6 +315,62 @@ public sealed class AccountService
         };
         _bus.Publish(EngineEventKind.AccountSnapshot,
             JsonSerializer.Serialize(tick, DvcJsonContext.Default.UiAccountTick));
+    }
+
+    /// <summary>
+    /// 把交易所原始余额收敛为"本金预算账户"：
+    /// 现金 = 账本现金 − 挂买单冻结（且不超过交易所真实可用）；持仓 = min(账本持仓, 交易所真实持仓)；
+    /// 账本里有、交易所已没有的持仓（紧急市价清仓/人工卖出）按最新价记为卖出，保持盈亏自洽。
+    /// </summary>
+    private async Task<(AccountBalances Balances, decimal Committed)> ApplyBudgetLedgerAsync(AccountBalances raw, TradingConfig cfg, CancellationToken ct)
+    {
+        var feeRate = _options.FeeBps / 10000m;
+        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, feeRate);
+
+        var cash = view.Cash;
+        var realized = view.RealizedPnl;
+        var holdings = new Dictionary<string, decimal>();
+        var avgCosts = new Dictionary<string, decimal>();
+        var positionValue = 0m;
+
+        foreach (var (symbol, (qty, avg)) in view.Positions)
+        {
+            var baseCcy = RiskEngine.BaseOf(symbol);
+            var actual = raw.Holdings.TryGetValue(baseCcy, out var a) ? a : 0m;
+            var managed = Math.Min(qty, actual);
+            var px = _market.Build(symbol).LastPrice;
+            if (px <= 0m)
+            {
+                px = avg;
+            }
+
+            var missing = qty - managed;
+            if (missing > 0.00000001m)
+            {
+                var proceeds = missing * px * (1m - feeRate);
+                cash += proceeds;
+                realized += proceeds - missing * avg;
+            }
+
+            if (managed > 0m)
+            {
+                holdings[baseCcy] = managed;
+                avgCosts[baseCcy] = avg;
+                positionValue += managed * px;
+            }
+        }
+
+        var reserved = 0m;
+        foreach (var o in await _orders.GetOpenAsync(null, ct))
+        {
+            if (o.IsBuy)
+            {
+                reserved += o.BaseAmount * o.Price * (1m + feeRate);
+            }
+        }
+
+        var free = Math.Max(0m, Math.Min(cash - reserved, raw.AvailableUsd));
+        return (new AccountBalances(free, holdings, cash + positionValue, realized, avgCosts), positionValue + reserved);
     }
 
     private static string? FindInstId(TradingConfig cfg, string baseCcy)

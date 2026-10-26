@@ -27,6 +27,10 @@ public sealed class DecisionOrchestratorService : BackgroundService
     private readonly ThoughtRepository _thoughts;
     private readonly RiskInterceptRepository _intercepts;
     private readonly TradingConfigStore _configStore;
+    private readonly OrderRepository _orders;
+    private readonly BrainService _brain;
+    private readonly DateTime _startedAtUtc = DateTime.UtcNow;
+    private DateTime _lastPlacedAtUtc = DateTime.MinValue;
     private readonly EngineEventBus _bus;
     private readonly ILogger _log;
     private readonly Dvc.Core.Configuration.TradingOptions _options;
@@ -45,6 +49,8 @@ public sealed class DecisionOrchestratorService : BackgroundService
         ThoughtRepository thoughts,
         RiskInterceptRepository intercepts,
         TradingConfigStore configStore,
+        OrderRepository orders,
+        BrainService brain,
         EngineEventBus bus,
         ILogger log,
         Dvc.Core.Configuration.TradingOptions options)
@@ -57,6 +63,8 @@ public sealed class DecisionOrchestratorService : BackgroundService
         _thoughts = thoughts;
         _intercepts = intercepts;
         _configStore = configStore;
+        _orders = orders;
+        _brain = brain;
         _bus = bus;
         _log = log;
         _options = options;
@@ -189,14 +197,35 @@ public sealed class DecisionOrchestratorService : BackgroundService
             return;
         }
 
-        var candidates = cfg.AssetScope == AssetScope.MultiPair
+        // 强制开关：Trading:ForceInternDecision=true → 每轮决策强制 InternDecision（无视看板/DB 热切换）
+        var effectiveProvider = _options.ForceInternDecision ? AiProvider.InternDecision : cfg.AiProvider;
+
+        // 关键阶段（启动 / 每小时宏观 / 亏损事件）先让大脑（LLM）复盘，赋予本轮决策"灵魂"；
+        // 其余节拍只读取最近一份有效指引。大脑仅在 InternDecision 模式下生效。
+        BrainDirective? directive = null;
+        if (effectiveProvider == AiProvider.InternDecision)
+        {
+            directive = req.Trigger == DecisionTrigger.StrategyTick
+                ? _brain.Current
+                : await _brain.ReviewOnKeyStageAsync(req.Trigger, ct) ?? _brain.Current;
+        }
+
+        // 空转时长：距上一次买单（含被拒/撤销的）或程序启动已过多久；一直不入场就没有收益，供 InternDecision 兜底试单。
+        // 只看买单：持仓管家反复撤挂卖单不算"在交易"
+        var lastOrderAt = (await _orders.ListRecentAsync(30, ct)).FirstOrDefault(o => o.Side == OrderSide.Buy)?.CreatedAtUtc ?? DateTime.MinValue;
+        var idleSince = new[] { lastOrderAt, _lastPlacedAtUtc, _startedAtUtc }.Max();
+        var idleMinutes = (decimal)(DateTime.UtcNow - idleSince).TotalMinutes;
+
+        // 候选池：Multi-Pair 常驻；Single-Pair 下一旦空转到该试单了也要提供（行情仍订阅着 WatchSymbols），否则已持仓时无处可试
+        var probeDue = _options.Profit.Enabled && _options.Profit.IdleProbeMinutes > 0 &&
+                       idleMinutes >= _options.Profit.IdleProbeMinutes;
+        var candidates = cfg.AssetScope == AssetScope.MultiPair || probeDue
             ? _market.BuildAll(cfg.WatchSymbols)
             : null;
 
-        var input = AiInputBuilder.Build(req.Trigger, cfg, state, activeContext, candidates, req.LastLoss);
+        var input = AiInputBuilder.Build(req.Trigger, cfg, state, activeContext, candidates,req.LastLoss, _options, directive, idleMinutes);
         var request = new AiRequest(SystemPromptFactory.Build(), input);
-        // 强制开关：Trading:ForceInternDecision=true → 每轮决策强制 InternDecision（无视看板/DB 热切换）
-        var provider = _aiFactory(_options.ForceInternDecision ? AiProvider.InternDecision : cfg.AiProvider);
+        var provider = _aiFactory(effectiveProvider);
         var sessionId = Guid.NewGuid().ToString("N");
 
         _log.LogInfo($"[决策开始] {sessionId[..8]} trigger={req.Trigger} provider={provider.ProviderName}");
@@ -271,11 +300,20 @@ public sealed class DecisionOrchestratorService : BackgroundService
                     var side = string.Equals(exec.Side, "SELL", StringComparison.OrdinalIgnoreCase)
                         ? OrderSide.Sell
                         : OrderSide.Buy;
-                    var ctx = targetSymbol == cfg.ActiveSymbol ? activeContext : _market.Build(targetSymbol);
+                    // 下单前重新读盘口：AI 推理要几秒，决策开始时读到的买一/卖一价可能早已过期（尤其是跨价差买入）
+                    var ctx = _market.Build(targetSymbol);
+                    if (ctx.LastPrice <= 0m)
+                    {
+                        ctx = targetSymbol == cfg.ActiveSymbol ? activeContext : ctx;
+                    }
                     var explicitPrice = exec.Price;
                     var price = explicitPrice is > 0
                         ? explicitPrice.Value
-                        : side == OrderSide.Buy ? ctx.BestBid : ctx.BestAsk;
+                        : side == OrderSide.Buy
+                            // 跨价差买入：限价挂在卖一价上方留 5bp 缓冲——决策到下单有延迟，卖一价会跳，刚好挂在旧卖一价常常追不上；
+                            // 仍是限价单，按卖盘价成交，最多多付 5bp
+                            ? (exec.CrossSpread && ctx.BestAsk > 0m ? ctx.BestAsk * 1.0005m : ctx.BestBid)
+                            : ctx.BestAsk;
                     if (price <= 0)
                     {
                         price = ctx.LastPrice;
@@ -288,9 +326,72 @@ public sealed class DecisionOrchestratorService : BackgroundService
                         amount = holdingBase * ctx.LastPrice;
                     }
 
+                    // ---- 灵魂护栏（先于风控）：永远朝盈利方向 ----
+                    // 尘埃（< $1）不算持仓；跨价差买入 = 空转试单，只被硬止血拦（LLM 软禁买不拦，否则永远没有成交）
+                    var holdingNow = holdingBase * ctx.LastPrice >= 1m;
+                    if (side == OrderSide.Buy && directive is not null && directive.BlocksBuys(holdingNow && !exec.CrossSpread))
+                    {
+                        PublishFlow($"🧠 大脑指引禁止新开买单（{directive.Posture}）：{targetSymbol} 买单暂缓，只许卖出/观望");
+                        diagnosis += " | 大脑止血：本轮禁止新买";
+                        break;
+                    }
+
+                    // 买入前看仓位余地：仓位已满就专注卖出回笼现金；有余地则把额度收敛到余地内
+                    if (side == OrderSide.Buy)
+                    {
+                        var room = RiskEngine.BuyRoom(state.EquityUsd, state.AvailableUsd, _options, state.CommittedUsd);
+                        if (room < 1m)
+                        {
+                            PublishFlow($"🔁 仓位已满（可新买余地 ${room:0.00}），本轮不再买入，专注卖出回笼现金");
+                            diagnosis += " | 仓位已满，专注卖出";
+                            break;
+                        }
+
+                        if (amount > room)
+                        {
+                            PublishFlow($"🔁 买单额度 ${amount:0.00} 收敛到仓位余地 ${room:0.00}（保留现金以便循环）");
+                            amount = room;
+                        }
+                    }
+
+                    // 已有未成交卖单（持仓管家的止盈挂单等）：不重复挂卖
+                    if (side == OrderSide.Sell &&
+                        (await _orders.GetOpenAsync(targetSymbol, ct)).Any(o => o.Side == OrderSide.Sell))
+                    {
+                        PublishFlow($"📤 {targetSymbol} 已有未成交的卖单在等待成交，本轮不重复挂卖");
+                        break;
+                    }
+
+                    if (side == OrderSide.Sell && _options.Profit.Enabled &&
+                        state.AvgCosts.TryGetValue(RiskEngine.BaseOf(targetSymbol), out var avgCost) && avgCost > 0m)
+                    {
+                        var heldMin = state.PositionAgeMinutes.TryGetValue(RiskEngine.BaseOf(targetSymbol), out var hm) ? hm : 0m;
+                        var minNet = ProfitPolicy.MinNetProfitBps(_options, directive, heldMin);
+                        var stopLoss = ProfitPolicy.StopLossPercent(_options, directive);
+                        var floor = Math.Ceiling(ProfitPolicy.MinProfitSellPrice(avgCost, _options.FeeBps, minNet) * 1_000_000m) / 1_000_000m;
+                        var lossPct = ctx.LastPrice > 0m ? (avgCost - ctx.LastPrice) / avgCost * 100m : 0m;
+                        if (price < floor && lossPct < stopLoss)
+                        {
+                            // 风控价格偏离护栏内可挂出的最高卖价（留 10bps 余量）
+                            var ceiling = (ctx.BestAsk > 0m ? ctx.BestAsk : ctx.LastPrice) *
+                                          (1m + Math.Max(0, _options.MaxPriceDeviationBps - 10) / 10000m);
+                            if (floor <= ceiling)
+                            {
+                                PublishFlow($"💰 盈利护栏：{targetSymbol} 卖价 {price:0.######} 低于保本价 {floor:0.######}（成本 {avgCost:0.######}），改挂保本价等待成交");
+                                price = floor;
+                            }
+                            else
+                            {
+                                PublishFlow($"💰 盈利护栏：{targetSymbol} 保本价 {floor:0.######} 远高于盘口 {ctx.BestAsk:0.######}，且浮亏 {Math.Max(0m, lossPct):0.00}% 未触及止损 {stopLoss:0.##}%，继续持有不亏钱卖出");
+                                diagnosis += " | 盈利护栏：未达保本价，继续持有";
+                                break;
+                            }
+                        }
+                    }
+
                     var verdict = RiskEngine.ValidateOrder(
                         cfg, _options, ctx, targetSymbol, side, amount, price,
-                        state.AvailableUsd, holdingBase, state.EquityUsd);
+                        state.AvailableUsd, holdingBase, state.EquityUsd, state.CommittedUsd);
 
                     if (!verdict.Allowed)
                     {
@@ -298,6 +399,11 @@ public sealed class DecisionOrchestratorService : BackgroundService
                         vetoReason = verdict.Reason;
                         await RecordInterceptAsync(targetSymbol, amount, verdict, sessionId, ct);
                         break;
+                    }
+
+                    if (side == OrderSide.Buy)
+                    {
+                        _lastPlacedAtUtc = DateTime.UtcNow; // 订单落库有延迟，内存里先记一笔，避免空转兜底在落库前重复试单
                     }
 
                     await _executor.Commands.WriteAsync(new ExecCommand(

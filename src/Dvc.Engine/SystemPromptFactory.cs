@@ -11,6 +11,8 @@ public static class SystemPromptFactory
         必须利用你的思考空间（thinking 标签）进行复盘。你唯一的目的是评估当前的亏损属于正常概率
         摩擦，还是市场环境发生了宏观趋势扭转（例如单边暴跌）。
 
+        {SOUL}
+
         【硬性约束】
         1. 严禁产生杠杆或做空思维；系统是纯现货（Spot）账户，任何做空/合约/杠杆指令将被直接拒收。
         2. 任何决策资产绝不允许触碰黑名单币种（Current_Config.Blacklist）。
@@ -43,5 +45,5 @@ public static class SystemPromptFactory
         请先在 thinking 中用中文完成推理复盘，最后只输出上述 JSON，不要输出任何其他文字。
         """;
 
-    public static string Build() => Body;
+    public static string Build() => Body.Replace("{SOUL}", Dvc.Core.Ai.ProfitSoul.Creed);
 }

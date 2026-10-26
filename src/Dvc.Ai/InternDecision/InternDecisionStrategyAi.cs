@@ -90,17 +90,44 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
         var cfg = i.CurrentConfig;
 
         var sb = new StringBuilder();
-        sb.AppendLine("【策略】高频现货限价微套：默认持续在市场内挂单；仅当盘口无任何微套空间时才观望（hold）。禁止做空/杠杆，只允许限价单。");
+        sb.AppendLine("【策略】高频现货限价微套，是一个完整的买卖循环：低位买入 → 持有 → 到保本价之上卖出落袋 → 现金回笼 → 再买入。" +
+                      "盈利只在卖出时兑现，所以持仓时卖出优先于加仓；仓位满了必须先卖。禁止做空/杠杆，只允许限价单。");
+        sb.AppendLine(ProfitSoul.OneLiner);
         sb.AppendLine($"【触发】{i.TriggerReason}，系统时间 {i.SystemTime}");
         sb.AppendLine($"【账户】初始本金 ${fm.InitialCapital:0.00}，当前总权益 ${fm.CurrentTotalEquity:0.00}，累计盈亏 ${fm.AccumulatedProfit:0.00}，" +
                       $"可用 USD ${fm.AvailableUsd:0.00}，风控上限 ${fm.MaxAllowedOrderSize:0.00}，最近亏损 ${fm.LastTradeLossAmount:0.00}，持仓 {fm.PositionBaseQty:0.########}，已实现盈亏 ${fm.RealizedPnl:0.00}");
-        if (fm.AvailableUsd < 1m && fm.PositionBaseQty > 0m)
+        if (fm.PositionBaseQty > 0m && fm.PositionAvgCost > 0m)
         {
-            sb.AppendLine("【资金约束】可用 USD 已几乎耗尽（资金已全部买入持仓）。此时切勿选择 buy——会因可用 USD 不足被风控拦截并反复重试；应选择 sell 释放资金，或 hold 等待。");
+            sb.AppendLine($"【持仓盈亏】均价 {fm.PositionAvgCost:0.######}（含买入手续费），保本卖出价 {fm.PositionMinProfitSellPrice:0.######}" +
+                          $"（卖价低于它就是亏钱，除非已触及止损线），全部持仓浮动盈亏 ${fm.UnrealizedPnl:0.0000}；" +
+                          $"已持有 {fm.PositionHeldMinutes:0} 分钟（持仓越久止盈目标越低，最终只要求覆盖手续费，以便尽快周转）");
         }
-        else if (fm.AvailableUsd < 1m)
+
+        if (i.BrainDirective is { } brain)
         {
-            sb.AppendLine("【资金约束】可用 USD 不足（< $1），无法再开新买单；请选择 sell 或 hold。");
+            sb.AppendLine($"【大脑复盘指引·{brain.Source}/{brain.Trigger}】姿态 {brain.Posture}；风险档位上限 {brain.MaxRiskRatio:0.##}；" +
+                          (brain.AllowNewBuys ? "允许开新买单"
+                              : brain.HardStop ? "禁止新开买单（硬止血：只许卖出/观望）"
+                              : "持仓期间不再加仓（先卖出回笼现金；空仓时照常买入）") +
+                          (string.IsNullOrWhiteSpace(brain.Guidance) ? "" : $"；指引：{brain.Guidance}"));
+        }
+
+        sb.AppendLine($"【仓位】已占用 ${fm.CommittedUsd:0.00}（{fm.ExposurePercent:0.#}% 权益，上限 {fm.MaxExposurePercent:0.#}%），当前还能新买 ${fm.BuyRoomUsd:0.00}；" +
+                      (fm.PositionBaseQty > 0m
+                          ? (fm.PositionSellableNow
+                              ? $"持仓已在保本价之上（浮动 {fm.PositionUnrealizedPercent:0.###}%）→ 现在就能盈利卖出，请优先选 sell 落袋。"
+                              : $"持仓浮动 {fm.PositionUnrealizedPercent:0.###}%，买一价尚未到保本卖出价，卖单会挂在保本价等待，可 hold 或继续观察。")
+                          : "当前空仓。"));
+        if (fm.PositionBaseQty <= 0m && fm.IdleMinutes >= 1m)
+        {
+            sb.AppendLine($"【空转提醒】已空仓且 {fm.IdleMinutes:0.#} 分钟没有任何订单。不交易就没有收益：只要价差能覆盖双边手续费、" +
+                          "买一有支撑，就应该小仓位挂买单入场，把买→卖→回笼的循环转起来，而不是一直观望。");
+        }
+
+        if (fm.BuyRoomUsd < 1m)
+        {
+            sb.AppendLine("【资金约束】可新买额度已不足 $1（资金已投入持仓/挂单，或达到总仓位上限）。此时切勿选择 buy——会被拦截并反复重试；" +
+                          "应选择 sell 回笼现金（价格不低于保本价），或 hold 等待。");
         }
         sb.AppendLine($"【配置】模式 {cfg.TradingMode}，范围 {cfg.AssetScope}，聚焦 {cfg.ActiveSymbol}，黑名单 {string.Join(',', cfg.Blacklist)}");
         if (ms.ActiveSymbolOrderbook is { } book)
@@ -162,12 +189,12 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
             ["action"] = new JsonObject
             {
                 ["type"] = "choice",
-                ["instructions"] = "本策略是高频现货限价微套（Scalping），正常应持续在市场内挂单；除非当前确实没有微套空间，否则请优先在 buy / sell 中二选一，不要选 hold。结合盘口五档、价差、不平衡与持仓判断。重要：务必先看【资金约束】行——若可用 USD 不足以买单，切勿选 buy（会被风控以余额不足拦截并反复重试），应选 sell 或 hold。",
+                ["instructions"] = "本策略是高频现货限价微套（Scalping）的完整买卖循环，永远朝盈利方向：盈利只在卖出时兑现。先看【仓位】行：已持仓且能盈利卖出就选 sell 落袋；仓位已满/可新买额度不足就不要选 buy，选 sell 或 hold；仅当空仓或仓位有余地、且预期净利润（扣双边手续费）为正时才选 buy；看不到净利润空间选 hold。若【大脑复盘指引】禁止新开买单则不要选 buy；卖出价不得低于【保本卖出价】（止损线除外）。",
                 ["criteria"] = new JsonObject
                 {
-                    ["buy"] = "挂限价买单：买一支撑厚（不平衡>0）或价格回踩买一/买二支撑时，吃回调/微套；活跃震荡市优先此项（需可用 USD 足够）",
-                    ["sell"] = "挂限价卖单：已持仓且到达止盈/认赔位，或卖一压力重（不平衡<0）时离场（可释放资金）",
-                    ["hold"] = "仅当无任何微套空间才观望：价差过宽、五档无支撑压力、波动不足以覆盖手续费，或可用 USD 不足以买单（例外，非常态）",
+                    ["buy"] = "挂限价买单：仅限【仓位】有余地（可新买额度足够）时；买一支撑厚（不平衡>0）或价格回踩买一/买二支撑时吃回调/微套，且买入后要有明确的保本价之上卖出目标",
+                    ["sell"] = "挂限价卖单（整仓）：已持仓且价格不低于【保本卖出价】（覆盖成本+手续费+最小净利润）时落袋，回笼现金才能开始下一轮；卖一压力重（不平衡<0）更应尽快兑现；仅当浮亏触及止损线才允许认赔离场",
+                    ["hold"] = "无净利润空间或无事可做时观望：价差过宽、五档无支撑压力、波动不足以覆盖手续费；持仓尚未到保本价且不到止损线时耐心等待（止盈挂单会自动挂在保本价）",
                     ["cancel_all"] = "环境扭转/单边暴跌时撤销全部挂单，退守现金",
                 },
             },
@@ -195,7 +222,7 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
             q["focus_symbol"] = new JsonObject
             {
                 ["type"] = "choice",
-                ["instructions"] = "$20 本金不允许分仓：选择当前周期独占聚焦的单一币种（避开黑名单，选期望值最高者）：",
+                ["instructions"] = "本金有限不允许分仓：选择当前周期独占聚焦的单一币种（避开黑名单，选净利润期望最高者）：",
                 ["criteria"] = focus,
             };
         }
@@ -347,13 +374,102 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
         }
 
         var ratio = ResolveRatio(risk, Ratios());
-        var size = Math.Round(fm.MaxAllowedOrderSize * ratio, 2, MidpointRounding.AwayFromZero);
+        var brainNote = "";
+        if (i.BrainDirective is { } dir && ratio > dir.MaxRiskRatio)
+        {
+            brainNote = $"（大脑限档：{ratio:0%}→{dir.MaxRiskRatio:0%}）";
+            ratio = dir.MaxRiskRatio;
+        }
+
+        var size = Math.Round(fm.MaxAllowedOrderSize * ratio, 2, MidpointRounding.ToZero);
+        // 市值不足 $1 的尘埃卖不出去（交易所最小下单额/持仓管家也忽略它），不能算"已持仓"——
+        // 否则试单永远认为"已持有，去候选池挑别的币"，而候选池为空时就一直空转
+        var lastPx = i.MarketSnapshot.LastPrice;
+        var holding = fm.PositionBaseQty > 0m && (lastPx <= 0m || fm.PositionBaseQty * lastPx >= 1m);
+
+        // 卖出优先：持仓已在保本价之上时，买入/观望的意图一律改为落袋（盈利只在卖出时兑现）
+        if (holding && fm.PositionSellableNow && action is "buy" or "hold" or null or "")
+        {
+            action = "sell";
+            brainNote += "（持仓已达保本价之上，优先落袋）";
+        }
+
+        // 空转兜底：空仓且长时间没有任何订单（决策中心一直 hold）= 零收益。小仓位试单买入，把循环转起来：
+        // 买入后持仓管家会自动在保本价挂止盈卖单，成交即回笼现金。价差过宽（吃价差必亏）或大脑硬止血时不试。
+        // 已持有一个币时也不能干等：只要还有仓位额度，就在候选池再挑一个无持仓、价差窄的币并行周转（受 MaxOpenPositions 限制）。
+        var probed = false;
+        var targetSymbol = d.ImmediateExecutionOrder.TargetSymbol;
+        var targetHeld = holding || fm.HeldSymbols.Contains(targetSymbol, StringComparer.OrdinalIgnoreCase);
+        if ((action is "hold" or null or "" || (action == "sell" && !targetHeld)) &&
+            fm.IdleProbeAfterMinutes > 0m && fm.IdleMinutes >= fm.IdleProbeAfterMinutes &&
+            fm.BuyRoomUsd >= 1m)
+        {
+            string? probeSymbol = null;
+            if (!targetHeld)
+            {
+                var spread = SpreadBps(i, targetSymbol);
+                if (i.BrainDirective?.BlocksBuys(false) != true && (spread is null || spread <= fm.IdleProbeMaxSpreadBps))
+                {
+                    probeSymbol = targetSymbol;
+                }
+            }
+            else if (fm.HeldSymbols.Count < fm.MaxOpenPositions && i.BrainDirective?.BlocksBuys(false) != true)
+            {
+                // 注意用 BlocksBuys(false)：大脑 LLM 的"禁止新买"只约束 Intern 自己的买入意图，
+                // 空转兜底是"不能一直不交易"的安全网，只被规则硬止血（回撤逼近熔断线）拦截
+                probeSymbol = PickProbeCandidate(i, fm);
+
+                // 候选池为空（行情只订阅了一个币 / 其他币价差过宽）也不能干等：在已持有的标的上继续小额加仓周转，
+                // 总敞口仍受 MaxExposureRatio / 单笔上限约束，成交后卖单按整仓均价重新计算
+                if (probeSymbol is null)
+                {
+                    var spread = SpreadBps(i, targetSymbol);
+                    if (spread is null || spread <= fm.IdleProbeMaxSpreadBps)
+                    {
+                        probeSymbol = targetSymbol;
+                    }
+                }
+            }
+
+            if (probeSymbol is not null)
+            {
+                probed = true;
+                action = "buy";
+                d.ImmediateExecutionOrder.TargetSymbol = probeSymbol;
+                d.ImmediateExecutionOrder.CrossSpread = true; // 吃卖一价，确保入场（排买一在上行行情里永远买不到）
+                size =Math.Min(fm.BuyRoomUsd,
+                    Math.Round(fm.MaxAllowedOrderSize * Math.Max(ratio, 0.5m), 2, MidpointRounding.ToZero));
+                brainNote += $"（已空转 {fm.IdleMinutes:0.#} 分钟没有新买单，启动试单兜底：小仓位买入 {probeSymbol}，" +
+                             "成交后由持仓管家挂保本卖单，多路并行周转）";
+            }
+        }
+
+        // 仓位已满（或资金耗尽）：买入无法执行，改为有持仓则卖/否则观望
+        if (action == "buy" && fm.BuyRoomUsd < 1m)
+        {
+            action = holding ? "sell" : "hold";
+            brainNote += holding ? "（仓位已满，买入改为卖出回笼现金）" : "（无可新买额度，改为观望）";
+        }
+        else if (action == "buy")
+        {
+            size = Math.Min(size, fm.BuyRoomUsd);
+        }
+
+        // 大脑止血：禁止新开买单时，买入一律降级为观望
+        if (action == "buy" && !probed && i.BrainDirective is { } stopBuy && stopBuy.BlocksBuys(holding))
+        {
+            d.DecisionLogic.Diagnosis = $"大脑指引（{stopBuy.Posture}）禁止新开买单，Intern-Decision 的买入意图降级为观望";
+            d.DecisionLogic.ActionType = "HOLD";
+            d.ImmediateExecutionOrder.Action = "HOLD";
+            d.ImmediateExecutionOrder.ExecuteNow = false;
+            return d;
+        }
 
         switch (action)
         {
             case "buy":
                 d.DecisionLogic.Diagnosis =
-                    $"Intern-Decision 决策：{market} → 挂限价买单，额度 ${size:0.00}（风控上限 ${fm.MaxAllowedOrderSize:0.00} × {ratio:0%}）";
+                    $"Intern-Decision 决策：{market} → 挂限价买单，额度 ${size:0.00}（风控上限 ${fm.MaxAllowedOrderSize:0.00} × {ratio:0%}）{brainNote}";
                 d.DecisionLogic.ActionType = "PLACE_LIMIT_BUY";
                 d.ImmediateExecutionOrder.Action = "PLACE_LIMIT_BUY";
                 d.ImmediateExecutionOrder.Side = "BUY";
@@ -362,11 +478,11 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
 
             case "sell":
                 d.DecisionLogic.Diagnosis =
-                    $"Intern-Decision 决策：{market} → 挂限价卖单止盈/认赔离场";
+                    $"Intern-Decision 决策：{market} → 挂限价卖单，整仓落袋（价格受盈利护栏约束：不低于保本价，止损线除外）{brainNote}";
                 d.DecisionLogic.ActionType = "PLACE_LIMIT_SELL";
                 d.ImmediateExecutionOrder.Action = "PLACE_LIMIT_SELL";
                 d.ImmediateExecutionOrder.Side = "SELL";
-                d.ImmediateExecutionOrder.ProposedOrderSizeUsd = size;
+                d.ImmediateExecutionOrder.ProposedOrderSizeUsd = 0m; // 0 = 整仓（卖单不受买单额度限制，决策中心按持仓市值折算）
                 break;
 
             case "cancel_all":
@@ -377,7 +493,7 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
                 break;
 
             default:
-                d.DecisionLogic.Diagnosis = $"Intern-Decision 决策：{market} → 观望等待更优期望值窗口";
+                d.DecisionLogic.Diagnosis = $"Intern-Decision 决策：{market} → 观望等待更优期望值窗口{brainNote}";
                 d.DecisionLogic.ActionType = "HOLD";
                 d.ImmediateExecutionOrder.Action = "HOLD";
                 d.ImmediateExecutionOrder.ExecuteNow = false;
@@ -385,6 +501,45 @@ public sealed class InternDecisionStrategyAi : IStrategyAi
         }
 
         return d;
+    }
+
+    /// <summary>候选池里挑试单标的：非黑名单、无持仓、价差 ≤ 上限，5 分钟成交额最大者；没有则 null。</summary>
+    private static string? PickProbeCandidate(AiInputSnapshot i, AiFinancialMetrics fm)
+    {
+        if (i.PairSnapshots is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        return i.PairSnapshots
+            .Where(p => p.LastPrice > 0m && p.SpreadBps <= fm.IdleProbeMaxSpreadBps)
+            .Where(p => !fm.HeldSymbols.Contains(p.Symbol, StringComparer.OrdinalIgnoreCase))
+            .Where(p => !i.CurrentConfig.Blacklist.Any(b =>
+                p.Symbol.StartsWith(b, StringComparison.OrdinalIgnoreCase) && (p.Symbol.Length == b.Length || p.Symbol[b.Length] == '-')))
+            .OrderByDescending(p => p.Turnover5MUsd)
+            .Select(p => p.Symbol)
+            .FirstOrDefault();
+    }
+
+    /// <summary>目标标的的买卖价差（bps）：优先取候选池快照，其次聚焦标的盘口；取不到返回 null（不据此拦截）。</summary>
+    private static decimal? SpreadBps(AiInputSnapshot i, string symbol)
+    {
+        var pair = i.PairSnapshots?.FirstOrDefault(p => p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
+        if (pair is not null)
+        {
+            return pair.SpreadBps;
+        }
+
+        if (i.MarketSnapshot.ActiveSymbolOrderbook is { Bid1To5.Count: > 0, Ask1To5.Count: > 0 } book &&
+            symbol.Equals(i.CurrentConfig.ActiveSymbol, StringComparison.OrdinalIgnoreCase))
+        {
+            var bid = book.Bid1To5[0][0];
+            var ask = book.Ask1To5[0][0];
+            var mid = (bid + ask) / 2m;
+            return mid > 0m ? (ask - bid) / mid * 10000m : null;
+        }
+
+        return null;
     }
 
     /// <summary>风险档位候选文案（跟随 InternDecision:RiskAppetiteRatios：档位命名 + 实际占比，图例不再写死 25/50/100%）。</summary>

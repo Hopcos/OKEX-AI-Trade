@@ -12,6 +12,7 @@ namespace Dvc.Core;
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(Dvc.Core.Ai.AiInputSnapshot))]
 [JsonSerializable(typeof(Dvc.Core.Ai.AiOutputDecision))]
+[JsonSerializable(typeof(Dvc.Core.Ai.BrainDirective))]
 [JsonSerializable(typeof(Dvc.Core.Ai.AiOrderbook))]
 [JsonSerializable(typeof(Dvc.Core.Ai.AiPairSnapshot))]
 [JsonSerializable(typeof(Dictionary<string, decimal>))]

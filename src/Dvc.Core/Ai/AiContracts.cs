@@ -31,6 +31,11 @@ public sealed class AiInputSnapshot
     [JsonPropertyName("Pair_Snapshots")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<AiPairSnapshot>? PairSnapshots { get; set; }
+
+    /// <summary>大脑（LLM）最近一次复盘产出的策略指引（仅 InternDecision 模式且大脑启用时存在）。</summary>
+    [JsonPropertyName("Brain_Directive")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BrainDirective? BrainDirective { get; set; }
 }
 
 public sealed class AiFinancialMetrics
@@ -59,9 +64,69 @@ public sealed class AiFinancialMetrics
     [JsonPropertyName("Position_Base_Qty")]
     public decimal PositionBaseQty { get; set; }
 
-    /// <summary>已实现盈亏（USD）。</summary>
+    /// <summary>已实现盈亏（USD，净手续费）。</summary>
     [JsonPropertyName("Realized_Pnl")]
     public decimal RealizedPnl { get; set; }
+
+    /// <summary>聚焦标的持仓均价（含买入手续费；空仓为 0）。</summary>
+    [JsonPropertyName("Position_Avg_Cost")]
+    public decimal PositionAvgCost { get; set; }
+
+    /// <summary>聚焦标的持仓保本卖出价（成本 + 卖出手续费 + 最小净利润；空仓为 0）——卖价低于它就是亏钱。</summary>
+    [JsonPropertyName("Position_Min_Profit_Sell_Price")]
+    public decimal PositionMinProfitSellPrice { get; set; }
+
+    /// <summary>全账户持仓浮动盈亏（USD）。</summary>
+    [JsonPropertyName("Unrealized_Pnl")]
+    public decimal UnrealizedPnl { get; set; }
+
+    /// <summary>已占用资金（持仓市值 + 挂买单冻结，USD）。</summary>
+    [JsonPropertyName("Committed_Usd")]
+    public decimal CommittedUsd { get; set; }
+
+    /// <summary>已占用资金占总权益的百分比。</summary>
+    [JsonPropertyName("Exposure_Percent")]
+    public decimal ExposurePercent { get; set; }
+
+    /// <summary>总仓位上限（占总权益百分比，Trading:MaxExposureRatio）。</summary>
+    [JsonPropertyName("Max_Exposure_Percent")]
+    public decimal MaxExposurePercent { get; set; }
+
+    /// <summary>当前还能新买多少（USD）= min(单笔上限, 仓位上限剩余, 可用现金)；&lt; 1 表示不能再买，只能卖出或观望。</summary>
+    [JsonPropertyName("Buy_Room_USD")]
+    public decimal BuyRoomUsd { get; set; }
+
+    /// <summary>聚焦标的持仓当前能否盈利卖出（买一价 ≥ 保本卖出价）。</summary>
+    [JsonPropertyName("Position_Sellable_Now")]
+    public bool PositionSellableNow { get; set; }
+
+    /// <summary>聚焦标的持仓浮动盈亏百分比（相对含费均价）。</summary>
+    [JsonPropertyName("Position_Unrealized_Percent")]
+    public decimal PositionUnrealizedPercent { get; set; }
+
+    /// <summary>距离上一次下单（或程序启动）已空转多少分钟——一直 hold 没有任何订单就没有收益。</summary>
+    [JsonPropertyName("Idle_Minutes")]
+    public decimal IdleMinutes { get; set; }
+
+    /// <summary>空转达到多少分钟后触发试单兜底（Profit:IdleProbeMinutes，0 = 关闭）。</summary>
+    [JsonPropertyName("Idle_Probe_After_Minutes")]
+    public decimal IdleProbeAfterMinutes { get; set; }
+
+    /// <summary>空转试单允许的最大价差（bps）。</summary>
+    [JsonPropertyName("Idle_Probe_Max_Spread_Bps")]
+    public decimal IdleProbeMaxSpreadBps { get; set; }
+
+    /// <summary>当前持有的交易对（市值 ≥ $1，已排除碎仓）。</summary>
+    [JsonPropertyName("Held_Symbols")]
+    public List<string> HeldSymbols { get; set; } = [];
+
+    /// <summary>同时持仓币种数上限（Profit:MaxOpenPositions），空转试单据此决定要不要再开新仓。</summary>
+    [JsonPropertyName("Max_Open_Positions")]
+    public int MaxOpenPositions { get; set; }
+
+    /// <summary>聚焦标的已持有多少分钟（止盈目标随之衰减）。</summary>
+    [JsonPropertyName("Position_Held_Minutes")]
+    public decimal PositionHeldMinutes { get; set; }
 }
 
 public sealed class AiCurrentConfig
@@ -203,6 +268,10 @@ public sealed class AiExecutionOrder
     /// <summary>挂单方向（BUY / SELL）。</summary>
     [JsonPropertyName("Side")]
     public string? Side { get; set; }
+
+    /// <summary>买单是否直接挂卖一价（跨价差、基本立即成交）而不是排在买一价等——空转试单用，避免行情上行时永远买不到。</summary>
+    [JsonPropertyName("Cross_Spread")]
+    public bool CrossSpread { get; set; }
 
     /// <summary>挂单价；为空时由引擎按盘口（买一/卖一内沿）自动定价。</summary>
     [JsonPropertyName("Price")]

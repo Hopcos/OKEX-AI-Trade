@@ -35,7 +35,7 @@ else
     <div class="chart-legend">
         <span class="legend-item"><i class="swatch sw-equity"></i>总权益（复利阶梯）</span>
         <span class="legend-item"><i class="swatch sw-initial"></i>初始本金 $@Initial.ToString("0.00")</span>
-        <span class="legend-item"><i class="swatch sw-max"></i>最大下单上限（@((Store.Account?.MaxOrderSizeRatio ?? 0.20m).ToString("P0")) 复利）</span>
+        <span class="legend-item"><i class="swatch sw-max"></i>单笔买单上限（权益 × @((Store.Account?.MaxOrderSizeRatio ?? 0.20m).ToString("P0"))）</span>
     </div>
 }
 

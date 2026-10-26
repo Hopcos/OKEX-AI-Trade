@@ -15,14 +15,33 @@ public sealed record RiskVerdict(bool Allowed, string Reason, decimal AllowedAmo
 public static class RiskEngine
 {
     /// <summary>
-    /// 动态下单额度：最大允许下单额 = (初始本金 + max(0, 总权益 - 初始本金)) × 20%。
-    /// 盈利按比例复利抬升，亏损自动缩减，确保永不爆仓。
+    /// 动态下单额度：最大允许买单额 = min(当前总权益 × 比例, 绝对上限)。
+    /// 总权益 = 本金预算 ± 盈亏，所以盈利按比例复利抬升、亏损自动缩减，下单永远基于"这笔钱现在值多少"。
+    /// absoluteCap &lt;= 0 表示不启用绝对上限。
     /// </summary>
-    public static decimal MaxOrderSize(decimal initialCapital, decimal equityUsd, decimal ratio = 0.20m)
+    public static decimal MaxOrderSize(decimal equityUsd, decimal ratio = 0.20m, decimal absoluteCap = 0m)
     {
-        var effectivePrincipal = initialCapital + Math.Max(0m, equityUsd - initialCapital);
-        return Math.Round(effectivePrincipal * ratio, 2, MidpointRounding.AwayFromZero);
+        var byEquity = Math.Max(0m, equityUsd) * ratio;
+        var limit = absoluteCap > 0m ? Math.Min(byEquity, absoluteCap) : byEquity;
+        return Math.Round(limit, 2, MidpointRounding.ToZero);
     }
+
+    /// <summary>
+    /// 当前还能新买多少（USD）= min(单笔买单上限, 总仓位上限剩余空间, 可用现金)。
+    /// 已占用（持仓市值 + 挂买单冻结）优先用账户给出的真实值（<see cref="AccountState.CommittedUsd"/>）；
+    /// 缺省才按 权益 − 可自由动用现金 推算。
+    /// </summary>
+    public static decimal BuyRoom(decimal equityUsd, decimal availableUsd, TradingOptions options, decimal? committedUsd = null)
+    {
+        var perOrder = MaxOrderSize(equityUsd, options.MaxOrderSizeRatio, options.MaxOrderUsd);
+        var committed = committedUsd ?? Math.Max(0m, equityUsd - availableUsd);
+        var exposureRoom = ExposureCap(equityUsd, options) - committed;
+        return Math.Max(0m, Math.Round(Math.Min(perOrder, Math.Min(exposureRoom, availableUsd)), 2, MidpointRounding.ToZero));
+    }
+
+    /// <summary>总仓位上限（USD）：至少容得下一笔单笔买单，避免配置失误导致永远不能建仓。</summary>
+    public static decimal ExposureCap(decimal equityUsd, TradingOptions options) =>
+        Math.Max(0m, equityUsd) * Math.Max(options.MaxExposureRatio, options.MaxOrderSizeRatio);
 
     /// <summary>黑名单基币归一化判定（大小写与带 USDT 后缀容错）。</summary>
     public static bool IsBlacklisted(TradingConfig config, string symbol)
@@ -44,7 +63,8 @@ public static class RiskEngine
         decimal price,
         decimal availableUsd,
         decimal holdingBase,
-        decimal equityUsd)
+        decimal equityUsd,
+        decimal? committedUsd = null)
     {
         // 黑名单强阻断
         if (IsBlacklisted(config, symbol))
@@ -78,12 +98,26 @@ public static class RiskEngine
             }
         }
 
-        // 动态额度拦截（复利公式：以当前总权益为分子基准）
-        var maxAllowed = MaxOrderSize(config.InitialCapital, equityUsd, options.MaxOrderSizeRatio);
-        if (amountUsd > maxAllowed + 0.0001m)
+        // 动态额度拦截：只限制买单（买单才新增风险敞口）；卖单是减仓，受持仓数量约束即可，
+        // 否则持仓增值/多次建仓后会出现"一笔卖不掉"的反向风险。
+        var maxAllowed = MaxOrderSize(equityUsd, options.MaxOrderSizeRatio, options.MaxOrderUsd);
+        if (side == OrderSide.Buy && amountUsd > maxAllowed + 0.0001m)
         {
             return Veto("OVER_LIMIT", symbol, amountUsd, maxAllowed,
-                $"下单 ${amountUsd:0.00} 超过风控上限 ${maxAllowed:0.00}（(初始+max(0,权益-初始))×{options.MaxOrderSizeRatio:P0}），一票否决");
+                $"买单 ${amountUsd:0.00} 超过风控上限 ${maxAllowed:0.00}（当前总权益 ${equityUsd:0.00} × {options.MaxOrderSizeRatio:P0}"
+                + (options.MaxOrderUsd > 0m ? $"，绝对上限 ${options.MaxOrderUsd:0.00}" : "") + "），一票否决");
+        }
+
+        // 总仓位上限：保留现金，保证卖出回笼后还能继续循环
+        if (side == OrderSide.Buy)
+        {
+            var committed = committedUsd ?? Math.Max(0m, equityUsd - availableUsd);
+            var cap = ExposureCap(equityUsd, options);
+            if (committed + amountUsd > cap + 0.0001m)
+            {
+                return Veto("OVER_EXPOSURE", symbol, amountUsd, Math.Max(0m, cap - committed),
+                    $"买单 ${amountUsd:0.00} 将使总仓位达 ${committed + amountUsd:0.00}，超过总仓位上限 ${cap:0.00}（权益 × {Math.Max(options.MaxExposureRatio, options.MaxOrderSizeRatio):P0}），需先卖出回笼现金");
+            }
         }
 
         // 可用资金 / 持仓约束

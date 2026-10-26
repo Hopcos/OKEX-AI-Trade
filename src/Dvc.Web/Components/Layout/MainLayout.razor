@@ -28,7 +28,7 @@
     </main>
 
     <footer class="footer">
-        <span>初始本金 $@(Opt.InitialCapital.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)) · 单笔上限 = (初始本金 + max(0, 权益 − 初始本金)) × @(Opt.MaxOrderSizeRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture)) · 硬熔断线 = 初始本金 × @(Opt.CircuitBreakerRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture))</span>
+        <span>初始本金 $@(Opt.InitialCapital.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)) · 单笔买单上限 = 当前总权益（本金 ± 盈亏）× @(Opt.MaxOrderSizeRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture))@(Opt.MaxOrderUsd > 0 ? $"（≤ ${Opt.MaxOrderUsd:0.##}）" : "") · 硬熔断线 = 初始本金 × @(Opt.CircuitBreakerRatio.ToString("P0", System.Globalization.CultureInfo.InvariantCulture))</span>
         <span id="signalr-status" style="display:none"></span>
     </footer>
 </div>
