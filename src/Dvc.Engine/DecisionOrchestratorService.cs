@@ -336,6 +336,37 @@ public sealed class DecisionOrchestratorService : BackgroundService
                         break;
                     }
 
+                    // ---- 买入质量护栏：宁可少做，也不逆势/摊低成本/连环扫货 ----
+                    if (side == OrderSide.Buy && _options.Profit.Enabled)
+                    {
+                        var pf = _options.Profit;
+                        var baseCcyG = RiskEngine.BaseOf(targetSymbol);
+                        string? guard = null;
+                        if (pf.BlockBuysInDowntrend && ctx.TrendSignal15M is "BEARISH" or "BEARISH_STRONG")
+                        {
+                            guard = $"15M 趋势 {ctx.TrendSignal15M}（{ctx.Change15MPercent:0.00}%）下跌中不接刀";
+                        }
+                        else if (pf.NoAverageDownPercent > 0m && holdingNow &&
+                                 state.AvgCosts.TryGetValue(baseCcyG, out var avgG) && avgG > 0m && ctx.LastPrice > 0m &&
+                                 (avgG - ctx.LastPrice) / avgG * 100m > pf.NoAverageDownPercent)
+                        {
+                            guard = $"持仓浮亏 {(avgG - ctx.LastPrice) / avgG * 100m:0.00}% > {pf.NoAverageDownPercent:0.##}%，禁止摊低成本";
+                        }
+                        else if (pf.BuyCooldownSeconds > 0 &&
+                                 state.PositionAgeMinutes.TryGetValue(baseCcyG, out var ageG) && holdingNow &&
+                                 ageG * 60m < pf.BuyCooldownSeconds)
+                        {
+                            guard = $"距上次买入仅 {ageG * 60m:0}s < 冷却 {pf.BuyCooldownSeconds}s";
+                        }
+
+                        if (guard is not null)
+                        {
+                            PublishFlow($"🛡 买入护栏：{targetSymbol} {guard}，本轮不买");
+                            diagnosis += $" | 买入护栏：{guard}";
+                            break;
+                        }
+                    }
+
                     // 买入前看仓位余地：仓位已满就专注卖出回笼现金；有余地则把额度收敛到余地内
                     if (side == OrderSide.Buy)
                     {

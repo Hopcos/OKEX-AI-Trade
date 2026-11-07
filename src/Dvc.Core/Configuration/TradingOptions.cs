@@ -58,8 +58,14 @@ public sealed class TradingOptions
     /// <summary>单笔买单绝对上限（USD，0 = 不启用）：与"权益 × 比例"取较小者，用于给最大下单金额再加一道硬顶。</summary>
     public decimal MaxOrderUsd { get; set; }
 
-    /// <summary>单边手续费（bps，10 = 0.1%）：Paper 撮合按此扣费；Live 预算账本按此估算；盈利保本价据此计算。</summary>
-    public decimal FeeBps { get; set; } = 10m;
+    /// <summary>挂单（maker）单边手续费（bps，OKX 现货 Lv1 实测 8 = 0.08%）：Live 账本里买入按此计费（买单都是挂单成交）。</summary>
+    public decimal MakerFeeBps { get; set; } = 8m;
+
+    /// <summary>吃单（taker）单边手续费（bps，OKX 现货 Lv1 实测 10 = 0.10%）。</summary>
+    public decimal TakerFeeBps { get; set; } = 10m;
+
+    /// <summary>保守费率 = max(maker, taker)：用于 Paper 撮合与保本价，宁可多要 2bp，也不会因费率估低而亏钱卖出。</summary>
+    public decimal FeeBps => Math.Max(MakerFeeBps, TakerFeeBps);
 
     /// <summary>硬熔断阈值：总权益 &lt; 初始本金 * 70% 触发清仓停机。</summary>
     public decimal CircuitBreakerRatio { get; set; } = 0.70m;
@@ -127,6 +133,15 @@ public sealed class ProfitOptions
     /// 这么久之后降到 <see cref="MinNetProfitFloorBps"/>。避免一笔仓位占着额度干等够不到的目标价而没有周转。
     /// </summary>
     public int TargetDecayMinutes { get; set; } = 30;
+
+    /// <summary>下跌趋势不开新仓（默认开）：15M 趋势为 BEARISH/BEARISH_STRONG 时拒绝买入——手续费 20bp 往返，逆势接刀期望为负。</summary>
+    public bool BlockBuysInDowntrend { get; set; } = true;
+
+    /// <summary>禁止摊低成本（%，默认 0.3，0 = 关闭）：已持仓且现价低于均价超过该比例时不再加仓，避免越跌越买、把整笔本金套死。</summary>
+    public decimal NoAverageDownPercent { get; set; } = 0.3m;
+
+    /// <summary>同一交易对两次买入的最小间隔（秒，默认 180，0 = 关闭）：防止同一信号连续 14 笔满额扫货。</summary>
+    public int BuyCooldownSeconds { get; set; } = 180;
 
     /// <summary>止盈目标衰减到底的净利润（bps，默认 2）：仍保证扣完双边手续费后不亏钱。</summary>
     public decimal MinNetProfitFloorBps { get; set; } = 2m;
@@ -261,3 +276,4 @@ public sealed class InternDecisionOptions
     /// <summary>评分型问题档位 → 下单额度系数映射（保守/中性/激进）。</summary>
     public double[] RiskAppetiteRatios { get; set; } = [0.25, 0.5, 1.0];
 }
+

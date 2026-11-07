@@ -255,7 +255,7 @@ public sealed class AccountService
     public async Task<decimal?> ComputeSellRealizedAsync(long orderId, CancellationToken ct = default)
     {
         var cfg = _runtime.Snapshot();
-        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, _options.FeeBps / 10000m);
+        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, _options.MakerFeeBps / 10000m, _options.TakerFeeBps / 10000m);
         return view.SellRealizedByOrderId.TryGetValue(orderId, out var pnl) ? pnl : null;
     }
 
@@ -324,8 +324,9 @@ public sealed class AccountService
     /// </summary>
     private async Task<(AccountBalances Balances, decimal Committed)> ApplyBudgetLedgerAsync(AccountBalances raw, TradingConfig cfg, CancellationToken ct)
     {
-        var feeRate = _options.FeeBps / 10000m;
-        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, feeRate);
+        var feeRate = _options.MakerFeeBps / 10000m;
+        var sellFeeRate = _options.TakerFeeBps / 10000m;
+        var view = BudgetLedger.Replay(await _orders.ListFilledAsync(ct, _options.LedgerStartUtc), cfg.InitialCapital, feeRate, sellFeeRate);
 
         var cash = view.Cash;
         var realized = view.RealizedPnl;
@@ -347,7 +348,7 @@ public sealed class AccountService
             var missing = qty - managed;
             if (missing > 0.00000001m)
             {
-                var proceeds = missing * px * (1m - feeRate);
+                var proceeds = missing * px * (1m - sellFeeRate);
                 cash += proceeds;
                 realized += proceeds - missing * avg;
             }

@@ -16,8 +16,9 @@ public sealed record LedgerView(
 /// </summary>
 public static class BudgetLedger
 {
-    public static LedgerView Replay(IEnumerable<OrderRecord> fills, decimal initialCapital, decimal feeRate)
+    public static LedgerView Replay(IEnumerable<OrderRecord> fills, decimal initialCapital, decimal feeRate, decimal? sellFeeRate = null)
     {
+        var sellFee = sellFeeRate ?? feeRate; // 买入按 maker，卖出按 taker（可分别配置）
         var cash = initialCapital;
         var realized = 0m;
         var pos = new Dictionary<string, (decimal Qty, decimal AvgCost)>();
@@ -48,7 +49,7 @@ public static class BudgetLedger
                     continue; // 账本里没有这份持仓（预算外的卖出），忽略
                 }
 
-                var proceeds = sellQty * px * (1m - feeRate);
+                var proceeds = sellQty * px * (1m - sellFee);
                 cash += proceeds;
                 var pnl = proceeds - sellQty * p.AvgCost;
                 realized += pnl;

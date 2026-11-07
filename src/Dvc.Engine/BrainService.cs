@@ -469,7 +469,7 @@ public sealed class BrainService : BackgroundService
             持仓：{held}。
             仓位：已占用 ${state.CommittedUsd:0.00}（总仓位上限 权益×{Math.Max(_options.MaxExposureRatio, _options.MaxOrderSizeRatio):P0}），当前还能新买 ${RiskEngine.BuyRoom(state.EquityUsd, state.AvailableUsd, _options, state.CommittedUsd):0.00}。系统有持仓管家：持仓一到保本价之上就自动止盈落袋，浮亏触及止损线自动止损——你的指引要关注"现金能否回笼、循环能否转起来"。
             硬熔断线：权益 < ${state.InitialCapital * _options.CircuitBreakerRatio:0.00}（本金 × {_options.CircuitBreakerRatio:P0}），当前安全垫 ${state.EquityUsd - state.InitialCapital * _options.CircuitBreakerRatio:0.00}。
-            手续费：单边 {_options.FeeBps:0.##} bps；当前保本利润要求 {_options.Profit.MinNetProfitBps:0.##} bps；止损线 {_options.Profit.StopLossPercent:0.##}%。
+            手续费：挂单 {_options.MakerFeeBps:0.##} / 吃单 {_options.TakerFeeBps:0.##} bps（单边）；当前保本利润要求 {_options.Profit.MinNetProfitBps:0.##} bps；止损线 {_options.Profit.StopLossPercent:0.##}%。
 
             【最近战绩（回看 {_options.Brain.LookbackOrders} 单）】
             已平仓卖出 {st.Sells} 笔：盈利 {st.Wins} / 亏损 {st.Losses}，合计已实现 ${st.SumRealized:0.0000}，平均盈利 ${st.AvgWin:0.0000}，平均亏损 ${st.AvgLoss:0.0000}，当前连续亏损 {st.ConsecutiveLosses} 笔。
