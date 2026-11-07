@@ -18,7 +18,7 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
     [
         ("BTC-USDT", 96000m), ("ETH-USDT", 3500m), ("SOL-USDT", 185m), ("XRP-USDT", 0.58m),
         ("BNB-USDT", 620m), ("DOGE-USDT", 0.19m), ("ADA-USDT", 0.46m), ("AVAX-USDT", 34m),
-        ("LINK-USDT", 17.5m), ("TON-USDT", 5.9m),
+        ("LINK-USDT", 17.5m), ("TON-USDT", 5.9m), ("TRUMP-USDT", 1.20m),
     ];
 
     private readonly SimulationOptions _sim;

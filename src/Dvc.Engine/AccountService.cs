@@ -375,7 +375,7 @@ public sealed class AccountService
 
     private static string? FindInstId(TradingConfig cfg, string baseCcy)
     {
-        foreach (var w in cfg.WatchSymbols)
+        foreach (var w in cfg.WatchSymbols.Append(cfg.ActiveSymbol))
         {
             if (RiskEngine.BaseOf(w).Equals(baseCcy, StringComparison.OrdinalIgnoreCase))
             {

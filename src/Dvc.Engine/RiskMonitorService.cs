@@ -160,7 +160,7 @@ public sealed class RiskMonitorService : BackgroundService
     private string? FindInstId(string baseCcy)
     {
         var cfg = _runtime.Snapshot();
-        foreach (var w in cfg.WatchSymbols)
+        foreach (var w in cfg.WatchSymbols.Append(cfg.ActiveSymbol))
         {
             if (RiskEngine.BaseOf(w).Equals(baseCcy, StringComparison.OrdinalIgnoreCase))
             {
