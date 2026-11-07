@@ -63,6 +63,9 @@ $env:Trading__AiProvider = "InternDecision"
 | 单笔买单上限 | `MaxOrderSize = min(当前总权益 × MaxOrderSizeRatio, MaxOrderUsd)`（总权益 = 本金 ± 盈亏；盈利放大、亏损自动缩小；只限制买单，卖单是减仓不受限） | `RiskEngine` |
 | 黑名单 | 基础币名归一化拒绝（默认 `LUNA/FETT/MEME1` 示例） | `RiskEngine` |
 | 价格偏差 | 限价偏离盘口内沿超过 `MaxPriceDeviationBps`（默认 250bp）直接否决 | `RiskEngine` |
+| 逆势接刀拦截 | 15M 趋势为 BEARISH/BEARISH_STRONG 时禁止新开买单（`BlockBuysInDowntrend=true`），避免单边下跌逆势接飞刀 | `DecisionOrchestratorService` |
+| 摊平止损限制 | 已持仓且浮亏超过 `NoAverageDownPercent`（默认 0.3%）时禁止加仓摊低成本，杜绝单边连环扫货套死全部本金 | `DecisionOrchestratorService` |
+| 买入冷却间隔 | 同一交易对买入最小间隔 `BuyCooldownSeconds`（默认 180s），防止单一冲动信号连续满额扫货 | `DecisionOrchestratorService` |
 | 盈利护栏 | 卖价必须 ≥ 持仓成本 + 手续费 + `Profit:MinNetProfitBps`；未达保本价就改挂保本价等待，保本价远在盘口之外则继续持有；仅浮亏触及 `Profit:StopLossPercent` 才允许认赔 | `DecisionOrchestratorService` + `ProfitPolicy` |
 | 总仓位上限 | 持仓 + 挂买单占用 ≤ 权益 × `MaxExposureRatio`；买单额度收敛到剩余空间，满了就只卖不买 | `RiskEngine` + `DecisionOrchestratorService` |
 | 持仓管家 | 独立 2s 巡检：买一 ≥ 保本价立即止盈；否则在保本价挂止盈卖单；浮亏达止损线止损离场；覆盖全部持仓（含已不是聚焦标的的币） | `PositionManagerService` |
@@ -94,7 +97,7 @@ $env:Trading__AiProvider = "InternDecision"
 | 单笔买单上限 | `min(总权益 × MaxOrderSizeRatio, MaxOrderUsd)`，盈利后放大、亏损后缩小 |
 | 总仓位上限 | 持仓市值 + 挂买单冻结 ≤ 总权益 × `MaxExposureRatio`（默认 60%），永远保留现金 |
 | 可新买额度 | `min(单笔上限, 仓位上限剩余, 可用现金)`；< $1 时不再买入，专注卖出 |
-| 手续费 | `FeeBps` 单边（默认 10bp=0.1%）：Paper 撮合真实扣费；Live 由账本按此估算 |
+| 手续费 | `MakerFeeBps` 挂单（默认 8bp=0.08%）+ `TakerFeeBps` 吃单（默认 10bp=0.10%）：Live 账本买入按 Maker、卖出按 Taker 精确核算；保本价取保守费率 `FeeBps = max(Maker, Taker)` 确保不亏 |
 | 熔断线 | 总权益 < 本金 × `CircuitBreakerRatio` |
 
 **买卖循环（盈利只在卖出时兑现）**：低位买入 → 持有 → 到保本价之上卖出落袋 → 现金回笼 → 再买入。为了保证循环转得起来：
@@ -106,9 +109,9 @@ $env:Trading__AiProvider = "InternDecision"
 6. **止盈目标随持仓时间下调**：刚买入时要求净赚 `MinNetProfitBps`（大脑可再加最多 `MaxExtraProfitBps`），之后在 `TargetDecayMinutes`（30 分钟）内线性降到 `MinNetProfitFloorBps`（2bp，仍覆盖双边手续费、不亏钱）。持仓管家会把挂在旧高价的卖单撤掉、按新目标降价重挂。目的是保证周转：一笔仓位不会占着额度干等一个够不到的目标价。
 
 - **Paper**：纸面账户从本金起步，本身就是预算账户。挂单会冻结资金/持仓，不会"一份钱花两次"。
-- **Live**：OKX 账户余额可能远大于本金。系统用**预算账本**（`BudgetLedger`）按本系统自己的成交流水重放出"这笔钱"的现金/持仓/已实现盈亏，交易所里其它资金与其它币**不参与**盈亏、不会被动用、也不会被熔断清仓误卖；可用额度同时不超过交易所真实可用 USDT。已实现盈亏（OKX 不回传）由账本补算并落库，所以亏损唤醒与复盘统计在实盘同样有效。账本不含交易所实际返佣/档位费率差异，手续费按 `FeeBps` 估算。
+- **Live**：OKX 账户余额可能远大于本金。系统用**预算账本**（`BudgetLedger`）按本系统自己的成交流水重放出"这笔钱"的现金/持仓/已实现盈亏，交易所里其它资金与其它币**不参与**盈亏、不会被动用、也不会被熔断清仓误卖；可用额度同时不超过交易所真实可用 USDT。已实现盈亏（OKX 不回传）由账本补算并落库，所以亏损唤醒与复盘统计在实盘同样有效。账本根据买入挂单（`MakerFeeBps`，默认 8bp）与卖出（`TakerFeeBps`，默认 10bp）精确分边核算。
 - **预算大于交易所真实 USDT 时**（例如本金预算 80、账户里只有 18.58 USDT）：能动用的现金取两者较小值；"已占用仓位"只统计真实持仓市值 + 挂买单冻结，**不会**把"预算里没有真实资金的那部分"误算成已投入仓位（否则仓位会被判为"已满"而一笔都不买）。建议把 `InitialCapital` 调到与真实可用资金相当，盈亏口径才贴近实际。
-- 启动自检：Live 会提示"可用 USDT 少于本金预算"或"单笔上限低于 OKX 最小下单额（约 $10）"。
+- 启动自检：Live 会提示"可用 USDT 少于本金预算"或"单笔上限低于交易所可下单数量"。实测 OKX 现货以币种数量精度（`minSz/lotSz`）为准，无硬性 $10 门槛，小额多笔拆单完全可行。
 
 ---
 
@@ -162,7 +165,9 @@ InternDecision 负责每几秒一次的高频战术决策；**大脑**是战略�
 | `MaxOrderSizeRatio` | `0.20` | 单笔买单上限比例：当前总权益 × 该比例 |
 | `MaxOrderUsd` | `0`（不启用） | 单笔买单绝对上限（USD），与"权益×比例"取较小者 |
 | `MaxExposureRatio` | `0.6` | 总仓位上限：持仓市值 + 挂买单冻结 ≤ 总权益 × 该值。永远留一部分现金，保证"买 → 卖回笼 → 再买"的循环转得起来；仓位满了买单会被收敛/拒绝，系统只能卖 |
-| `FeeBps` | `10` | 单边手续费（bp，10=0.1%）：Paper 撮合扣费、Live 账本估算、保本价计算 |
+| `MakerFeeBps` | `8` | 挂单单边手续费（bp，8=0.08%）：OKX 现货 Lv1 费率；Live 账本买入按此计费 |
+| `TakerFeeBps` | `10` | 吃单单边手续费（bp，10=0.10%）：OKX 现货 Lv1 费率；Live 账本卖出按此计费 |
+| `FeeBps` | `10` | 衍生保守费率（只读属性，`= max(Maker, Taker)`）：用于 Paper 撮合扣费与保本卖出价计算，宁可多算 2bp，绝不亏钱卖出 |
 | `CircuitBreakerRatio` | `0.70` | 硬熔断：权益 < 本金×该值 → 清仓+永久停机 |
 | `AiMinIntervalSeconds` | `4.0` | LLM 提供方下，低优先级节拍的最小调用间隔（秒），防网关 429；高优先级唤醒不受限；Mock 不生效 |
 | `DefaultTimezoneOffsetHours` | `0` | 预留，当前版本未使用 |
@@ -183,6 +188,9 @@ InternDecision 负责每几秒一次的高频战术决策；**大脑**是战略�
 | `MaxOpenPositions` | `3` | 空转试单时允许同时持仓的币种数：已持有一个币又空转时，会再挑一个无持仓的币并行周转，到上限为止 |
 | `TargetDecayMinutes` | `30` | 止盈目标衰减时长（0=不衰减）：持仓越久要求净利润越低，该时长后降到 `MinNetProfitFloorBps`；卖单会随之降价重挂 |
 | `MinNetProfitFloorBps` | `2` | 止盈目标衰减到底的净利润（bp）：仍覆盖双边手续费，不会亏钱卖出 |
+| `BlockBuysInDowntrend` | `true` | **下跌趋势接刀拦截**：15M 趋势为 `BEARISH` 或 `BEARISH_STRONG` 时拒绝新开买单，逆势接飞刀期望为负 |
+| `NoAverageDownPercent` | `0.3` | **摊平止损限制**（%，0=关闭）：已持仓且现价低于持仓均价超过该比例时禁止加仓，防止越跌越买将整笔本金套死 |
+| `BuyCooldownSeconds` | `180` | **买入冷却间隔**（秒，0=关闭）：同一交易对两次买入的最小间隔，防止单点冲动信号连续连环扫货 |
 
 ### 6.3 `Trading:Brain`（大脑 LLM 复盘，详见第五节）
 
