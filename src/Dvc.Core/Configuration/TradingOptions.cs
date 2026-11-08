@@ -265,7 +265,7 @@ public sealed class DeepSeekOptions
 /// <summary>Intern-Decision 结构化决策服务配置（POST {BaseUrl}/v1/decisions）。</summary>
 public sealed class InternDecisionOptions
 {
-    public string BaseUrl { get; set; } = "http://localhost:8000";
+    public string BaseUrl { get; set; } = "http://127.0.0.1:8000";
 
     public string ApiKey { get; set; } = "";
 

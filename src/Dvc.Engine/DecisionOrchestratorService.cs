@@ -105,7 +105,7 @@ public sealed class DecisionOrchestratorService : BackgroundService
                 _runtime.WakeHigh(DecisionTrigger.MacroHourly, "MACRO_1H");
                 _log.LogInfo("1 小时宏观轮询：结算完成，唤醒 AI 宏观评估");
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
             }
@@ -169,7 +169,7 @@ public sealed class DecisionOrchestratorService : BackgroundService
                 _lastDecisionStartedAt = DateTime.UtcNow;
                 await ProcessDecisionAsync(req, ct);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;
             }

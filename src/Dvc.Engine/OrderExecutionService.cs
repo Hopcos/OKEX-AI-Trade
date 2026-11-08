@@ -432,7 +432,7 @@ public sealed class OrderExecutionService : BackgroundService
                         await OnFillAsync(merged, ct);
                     }
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     return;
                 }
