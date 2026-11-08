@@ -30,11 +30,16 @@ public static class ProfitPolicy
         return start - (start - end) * progress;
     }
 
-    /// <summary>有效止损线（%）：大脑可收紧，不可超过配置值。</summary>
+    /// <summary>有效止损线（%）：0 = 关闭止损（现货不割肉）；大脑可收紧，不可超过配置值。</summary>
     public static decimal StopLossPercent(TradingOptions o, BrainDirective? d)
     {
-        var cap = Math.Max(0.1m, o.Profit.StopLossPercent);
-        return d?.StopLossPercent is { } v ? Math.Clamp(v, 0.5m, cap) : cap;
+        if (o.Profit.StopLossPercent <= 0m)
+        {
+            return 0m; // 关闭止损，纯现货不接受亏损砸盘
+        }
+
+        var cap = o.Profit.StopLossPercent;
+        return d?.StopLossPercent is { } v && v > 0m ? Math.Clamp(v, 1.0m, cap) : cap;
     }
 
     /// <summary>

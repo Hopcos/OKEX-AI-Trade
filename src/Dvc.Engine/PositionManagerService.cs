@@ -146,7 +146,7 @@ public sealed class PositionManagerService : BackgroundService
             if (resting.Count > 0)
             {
                 var coveredQty = resting.Sum(o => Math.Max(0m, o.BaseAmount - o.FilledBaseAmount));
-                var tooLow = resting.Any(o => o.Price < floor * 0.9999m) && lossPct < stopLoss;
+                var tooLow = resting.Any(o => o.Price < floor * 0.9999m) && (stopLoss <= 0m || lossPct < stopLoss);
                 // 目标价已随持仓时间下调：挂在旧高价的卖单撤掉按新目标重挂（留 3bp 容差，避免频繁撤挂）
                 var tooHigh = resting.Any(o => o.Price > floor * 1.0003m);
                 if (coveredQty >= qty * 0.999m && !tooLow && !tooHigh)
@@ -177,11 +177,22 @@ public sealed class PositionManagerService : BackgroundService
                 reason = string.Create(CultureInfo.InvariantCulture,
                     $"止盈落袋：买一 {ctx.BestBid:0.######} ≥ 保本价 {floor:0.######}（成本 {avg:0.######}）");
             }
-            else if (lossPct >= stopLoss)
+            else if (stopLoss > 0m && lossPct >= stopLoss)
             {
-                price = ctx.BestBid;
+                // 现货防恶意插针与假摔割肉保护：
+                // 1. 现货没有杠杆和爆仓风险，绝不在盘口买一（BestBid）市价砸盘割肉，防止割在针底；
+                // 2. 至少挂在保本价与卖一价之间的防守位，等待价格反弹撮合成交，保持被动 Maker 退出。
+                var ceiling = (ctx.BestAsk > 0m ? ctx.BestAsk : ctx.LastPrice) *
+                              (1m + Math.Max(0, _options.MaxPriceDeviationBps - 10) / 10000m);
+                var defensivePrice = ctx.BestAsk > 0m ? Math.Min(floor, ctx.BestAsk) : floor;
+                if (defensivePrice > ceiling)
+                {
+                    continue;
+                }
+
+                price = defensivePrice;
                 reason = string.Create(CultureInfo.InvariantCulture,
-                    $"止损离场：浮亏 {lossPct:0.00}% ≥ 止损线 {stopLoss:0.##}%，释放被套资金");
+                    $"止损防守挂单：浮亏 {lossPct:0.00}% ≥ 止损线 {stopLoss:0.##}%，挂卖一/防守价 {price:0.######} 等待反弹离场（成本 {avg:0.######}，拒绝买一市价割肉）");
             }
             else
             {

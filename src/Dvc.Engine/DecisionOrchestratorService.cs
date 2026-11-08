@@ -401,7 +401,7 @@ public sealed class DecisionOrchestratorService : BackgroundService
                         var stopLoss = ProfitPolicy.StopLossPercent(_options, directive);
                         var floor = Math.Ceiling(ProfitPolicy.MinProfitSellPrice(avgCost, _options.FeeBps, minNet) * 1_000_000m) / 1_000_000m;
                         var lossPct = ctx.LastPrice > 0m ? (avgCost - ctx.LastPrice) / avgCost * 100m : 0m;
-                        if (price < floor && lossPct < stopLoss)
+                        if (price < floor && (stopLoss <= 0m || lossPct < stopLoss))
                         {
                             // 风控价格偏离护栏内可挂出的最高卖价（留 10bps 余量）
                             var ceiling = (ctx.BestAsk > 0m ? ctx.BestAsk : ctx.LastPrice) *
@@ -413,7 +413,9 @@ public sealed class DecisionOrchestratorService : BackgroundService
                             }
                             else
                             {
-                                PublishFlow($"💰 盈利护栏：{targetSymbol} 保本价 {floor:0.######} 远高于盘口 {ctx.BestAsk:0.######}，且浮亏 {Math.Max(0m, lossPct):0.00}% 未触及止损 {stopLoss:0.##}%，继续持有不亏钱卖出");
+                                PublishFlow($"💰 盈利护栏：{targetSymbol} 保本价 {floor:0.######} 远高于盘口 {ctx.BestAsk:0.######}，" +
+                                            (stopLoss > 0m ? $"且浮亏 {Math.Max(0m, lossPct):0.00}% 未触及止损 {stopLoss:0.##}%" : "且现货策略关闭主动割肉") +
+                                            "，继续持有不亏钱卖出");
                                 diagnosis += " | 盈利护栏：未达保本价，继续持有";
                                 break;
                             }

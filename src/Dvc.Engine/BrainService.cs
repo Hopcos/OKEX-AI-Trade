@@ -367,7 +367,7 @@ public sealed class BrainService : BackgroundService
             d.MaxRiskRatio = 0.2m;
             d.AllowNewBuys = drawdown < 0.20m;
             d.MinNetProfitBps = baseNet + 15m;
-            d.StopLossPercent = Math.Min(_options.Profit.StopLossPercent, 2m);
+            d.StopLossPercent = _options.Profit.StopLossPercent;
             d.Guidance = "保本第一：只在盘口买一支撑明显、价差足够覆盖手续费时极小仓试单；已有持仓优先在保本价之上落袋，不再加仓。";
             d.Reasoning = $"权益回撤 {drawdown:P1}，连续亏损 {st.ConsecutiveLosses} 笔，进入资本保全。";
         }
