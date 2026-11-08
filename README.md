@@ -66,9 +66,9 @@ $env:Trading__AiProvider = "InternDecision"
 | 逆势接刀拦截 | 15M 趋势为 BEARISH/BEARISH_STRONG 时禁止新开买单（`BlockBuysInDowntrend=true`），避免单边下跌逆势接飞刀 | `DecisionOrchestratorService` |
 | 摊平止损限制 | 已持仓且浮亏超过 `NoAverageDownPercent`（默认 0.3%）时禁止加仓摊低成本，杜绝单边连环扫货套死全部本金 | `DecisionOrchestratorService` |
 | 买入冷却间隔 | 同一交易对买入最小间隔 `BuyCooldownSeconds`（默认 180s），防止单一冲动信号连续满额扫货 | `DecisionOrchestratorService` |
-| 盈利护栏 | 卖价必须 ≥ 持仓成本 + 手续费 + `Profit:MinNetProfitBps`；未达保本价就改挂保本价等待，保本价远在盘口之外则继续持有；仅浮亏触及 `Profit:StopLossPercent` 才允许认赔 | `DecisionOrchestratorService` + `ProfitPolicy` |
+| 盈利护栏 | 卖价必须 ≥ 持仓成本 + 手续费 + `Profit:MinNetProfitBps`；未达保本价就改挂保本价等待，保本价远在盘口之外则继续持有；`StopLossPercent=0` 时关闭主动割肉，现货绝不以盘口买一市价砸盘割肉 | `DecisionOrchestratorService` + `ProfitPolicy` |
 | 总仓位上限 | 持仓 + 挂买单占用 ≤ 权益 × `MaxExposureRatio`；买单额度收敛到剩余空间，满了就只卖不买 | `RiskEngine` + `DecisionOrchestratorService` |
-| 持仓管家 | 独立 2s 巡检：买一 ≥ 保本价立即止盈；否则在保本价挂止盈卖单；浮亏达止损线止损离场；覆盖全部持仓（含已不是聚焦标的的币） | `PositionManagerService` |
+| 持仓管家 | 独立 2s 巡检：买一 ≥ 保本价立即止盈；否则在保本价挂止盈卖单；若启用止损且触发，以卖一/防守位挂被动单等待反弹，坚决不以买一吃单砸盘；覆盖全部持仓（含已不是聚焦标的的币） | `PositionManagerService` |
 | 大脑止血 | 大脑指引 `Allow_New_Buys=false` 时，买单一律降级为观望（InternDecision 模式） | `DecisionOrchestratorService` |
 | 资金不足/持仓不足 | 下单前校验可用 USD（已扣除挂单冻结与手续费）/ 卖出额度收敛到持仓市值（Paper 精确清仓不留尘埃） | `RiskEngine` + `OrderExecutionService` |
 | TTL 挂单自毁 | 120s 未成交自动撤销并知会 AI（ORDER_TIMEOUT 唤醒） | `OrderExecutionService` |
@@ -102,7 +102,7 @@ $env:Trading__AiProvider = "InternDecision"
 
 **买卖循环（盈利只在卖出时兑现）**：低位买入 → 持有 → 到保本价之上卖出落袋 → 现金回笼 → 再买入。为了保证循环转得起来：
 1. **总仓位封顶**：持仓 + 挂买单 ≤ 权益 × `MaxExposureRatio`（60%），永远留现金；买单额度会收敛到剩余空间，满了就只卖不买。
-2. **持仓管家**（`PositionManagerService`，独立于 AI、2 秒一次）：每个持仓必有退出计划——买一价 ≥ 保本价立即止盈；否则在保本价挂止盈卖单整仓等待；浮亏达止损线则止损离场。加仓后均价变化会自动撤单重挂，保证整仓都被覆盖。
+2. **持仓管家**（`PositionManagerService`，独立于 AI、2 秒一次）：每个持仓必有退出计划——买一价 ≥ 保本价立即止盈落袋；否则在保本价挂止盈卖单整仓等待成交；若启用止损且触发，以卖一/防守位挂被动单等待反弹（坚决不在盘口买一吃单砸盘割肉；现货模式下建议 `StopLossPercent=0` 关闭止损，完全依靠时间衰减保本平出）。加仓后均价变化会自动撤单重挂，保证整仓都被覆盖。
 3. **InternDecision 卖出优先**：快照里带 `Exposure_Percent / Buy_Room_USD / Position_Sellable_Now`，持仓已能盈利卖出时，买入/观望的意图会被改成卖出落袋；仓位满时买入改为卖出或观望。
 4. 卖单有效期 `SellOrderTtlSeconds`（600s）比买单（120s）更长，且不会重复挂卖。
 5. **反空转**：连续 `IdleProbeMinutes`（3 分钟）没有新买单时，InternDecision 的观望会被改成小仓位试单买入——空仓就买目标币；**已持有一个币也不干等**，会在候选池再挑一个无持仓、价差 ≤ `IdleProbeMaxSpreadBps` 的币并行周转（同时持仓币种数 ≤ `MaxOpenPositions`）。候选池为空（Single-Pair 或其他币价差过宽）时，会在已持有的标的上继续小额加仓，仍受总敞口/单笔上限约束；Single-Pair 下一旦该试单了，系统也会临时提供候选池。市值 < $1 的尘埃不算持仓（卖不掉，也不应阻止买入）。试单直接吃卖一价（限价挂在卖一上方 5bp 缓冲，保证入场；上行行情里排买一永远买不到）。**重启恢复**：启动时会恢复库里的未成交订单——Live 向 OKX 查最新状态（已成交/部分成交落库、仍挂着的重新跟踪并按 TTL 撤单），没有 OKX 订单号的（Paper 时代遗留）直接清理；Paper 的挂单在内存里，重启即清理。大脑的风险档位有下限 `Brain:MinRiskRatio`，大脑 LLM 的"禁止新买"只约束 Intern 自己的买入意图，试单只被规则硬止血（回撤逼近熔断线）拦截。
@@ -181,7 +181,7 @@ InternDecision 负责每几秒一次的高频战术决策；**大脑**是战略�
 | `Enabled` | `true` | 是否启用卖出盈利护栏（对所有决策提供方生效） |
 | `MinNetProfitBps` | `15` | 卖出必须净赚的最小利润（bp）：保本价 = 持仓均价×(1+该值)/(1−费率) |
 | `StopLossPercent` | `3.0` | 止损线（%，设为 0 关闭止损）：浮亏达到才放行认赔卖出；现货模式下建议设为 0（依靠持仓衰减至保本价平本离场，绝不买一市价砸盘割肉） |
-| `AutoExit` | `true` | 持仓管家：独立于 AI 的 2 秒巡检，对**所有持仓**自动退出——买一价 ≥ 保本价立即止盈；否则在保本价挂止盈卖单；浮亏达止损线则止损离场 |
+| `AutoExit` | `true` | 持仓管家：独立于 AI 的 2 秒巡检，对**所有持仓**自动退出——买一价 ≥ 保本价立即止盈落袋；否则在保本价挂止盈卖单整仓等待；若启用止损且触发，以卖一/防守位挂单等待反弹（坚决不在盘口买一市价砸盘割肉；现货建议设 `StopLossPercent=0` 关闭割肉） |
 | `SellOrderTtlSeconds` | `600` | 卖单（止盈）有效期（秒）；买单仍按 `OrderTtlSeconds`（120）。卖单是回笼现金的关键，活得更久 |
 | `IdleProbeMinutes` | `3` | **空转兜底**（0=关闭）：连续这么多分钟没有新买单（一直 HOLD）时，即使 InternDecision 说观望，也按小仓位试单买入（吃卖一价，成交后持仓管家自动挂卖单），让"买→卖→回笼"的循环转起来。不交易就没有收益；试单仍受单笔上限/总仓位/风控约束，规则硬止血时不触发 |
 | `IdleProbeMaxSpreadBps` | `8` | 空转试单允许的最大价差（bp）：试单吃卖一价，价差就是成本，过宽的币种不试 |
