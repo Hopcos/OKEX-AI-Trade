@@ -84,6 +84,58 @@ public sealed class SimulationMarket : IMarketDataFeed, IOrderGateway
     public decimal GetLastPrice(string symbol) =>
         _states.TryGetValue(symbol, out var st) ? st.LastPrice : 0m;
 
+    public Task WarmupAsync(Action<string, OrderBookSnapshot?, IReadOnlyList<Kline>> onWarmup, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var sym in _symbols)
+        {
+            if (!_states.TryGetValue(sym, out var st))
+            {
+                continue;
+            }
+
+            // 构造初始五档盘口
+            var mid = st.LastPrice;
+            var halfSpreadBps = _sim.SpreadBps / 2m;
+            var bids = new List<PriceLevel>();
+            var asks = new List<PriceLevel>();
+            for (var i = 0; i < 5; i++)
+            {
+                var gapBps = halfSpreadBps + i * halfSpreadBps;
+                var bidPx = RoundPrice(mid * (1m - gapBps / 10000m));
+                var askPx = RoundPrice(mid * (1m + gapBps / 10000m));
+                bids.Add(new PriceLevel(bidPx, 1.0m));
+                asks.Add(new PriceLevel(askPx, 1.0m));
+            }
+
+            var book = new OrderBookSnapshot(sym, now, bids, asks);
+            lock (_lock)
+            {
+                _latestBooks[sym] = book;
+            }
+
+            // 构造过去 60 分钟历史 1m K 线
+            var klines = new List<Kline>();
+            var p = mid * 0.995m;
+            for (var m = 60; m >= 1; m--)
+            {
+                var t = now.AddMinutes(-m);
+                var change = (decimal)((_rng.NextDouble() - 0.49) * 0.002);
+                var o = p;
+                var c = RoundPrice(o * (1m + change));
+                var h = RoundPrice(Math.Max(o, c) * 1.0005m);
+                var l = RoundPrice(Math.Min(o, c) * 0.9995m);
+                var v = RoundSize(0.1m + (decimal)_rng.NextDouble() * 0.5m);
+                klines.Add(new Kline(sym, "1m", t, o, h, l, c, v, v * c));
+                p = c;
+            }
+
+            onWarmup(sym, book, klines);
+        }
+
+        return Task.CompletedTask;
+    }
+
     // ================= 行情推进 =================
 
     private async Task RunAsync(CancellationToken ct)

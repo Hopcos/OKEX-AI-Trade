@@ -265,6 +265,38 @@ body {
 .chart-label-max { fill: var(--accent-info); font-size: 9px; }
 .chart-line-equity { stroke: var(--accent-pos); stroke-width: 2.4; }
 .chart-dot-equity { fill: var(--accent-pos); }
+.chart-dot-max { fill: var(--accent-info); }
+.chart-hover-line { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-tooltip {
+    position: absolute;
+    left: 0;
+    top: 0;
+    min-width: 150px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 5;
+}
+.chart-hit { position: absolute; inset: 0; pointer-events: none; }
+.chart-tooltip .tt-time {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-bottom: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--panel-border);
+}
+.chart-tooltip .tt-row { display: flex; justify-content: space-between; gap: 12px; }
+.chart-tooltip .tt-row span:first-child { color: var(--text-dim); }
+.chart-tooltip .tt-row b { font-variant-numeric: tabular-nums; }
+.chart-tooltip .tt-row.eq b { color: var(--accent-pos); }
+.chart-tooltip .tt-row.mx b { color: var(--accent-info); }
 .chart-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 11px; color: var(--text-dim); flex-wrap: wrap; }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { width: 16px; height: 4px; border-radius: 2px; display: inline-block; }

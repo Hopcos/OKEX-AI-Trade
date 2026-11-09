@@ -8,7 +8,7 @@
         <div class="decision-line">
             <div class="d-head">
                 <span class="badge badge-info">决策 @d.ActionType</span>
-                <span class="d-time">@Fmt.Time(DateTime.UtcNow)</span>
+                <span class="d-time">@Fmt.Time(d.Ts)</span>
                 @if (d.Vetoed)
                 {
                     <span class="badge badge-danger">被风控否决</span>

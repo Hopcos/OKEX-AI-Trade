@@ -43,6 +43,19 @@ public sealed class ThoughtRepository(AppDb db)
         return rows.Select(Unmap).ToList();
     }
 
+    /// <summary>按时间下限获取最近决策日志（最新在前，供看板启动预加载）。</summary>
+    public async Task<IReadOnlyList<ThoughtRecord>> ListSinceAsync(DateTime? sinceUtc = null, int limit = 40, CancellationToken ct = default)
+    {
+        using var conn = db.Open();
+        var rows = sinceUtc is null
+            ? await conn.QueryAsync<ThoughtRow>(new CommandDefinition(
+                "SELECT * FROM Agent_Thought_Log ORDER BY Id DESC LIMIT @limit", new { limit }, cancellationToken: ct))
+            : await conn.QueryAsync<ThoughtRow>(new CommandDefinition(
+                "SELECT * FROM Agent_Thought_Log WHERE CreatedAtUtc >= @since ORDER BY Id DESC LIMIT @limit",
+                new { since = SqliteFmt.Iso(sinceUtc.Value.ToUniversalTime()), limit }, cancellationToken: ct));
+        return rows.Select(Unmap).ToList();
+    }
+
     private static ThoughtRecord Unmap(ThoughtRow r) => new()
     {
         Id = r.Id,

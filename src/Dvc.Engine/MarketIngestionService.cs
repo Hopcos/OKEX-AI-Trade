@@ -46,8 +46,25 @@ public sealed class MarketIngestionService : BackgroundService
         _feed.OnOrderBook += _market.OnOrderBook;
         _feed.OnKlineClosed += OnKlineClosed;
 
+        // 启动预热：先拉取盘口微观结构实际数据（1m K线与盘口深度），使 15M 涨跌、1H 波幅等不必从 0 起步
+        try
+        {
+            await _feed.WarmupAsync((sym, book, klines) =>
+            {
+                _market.Warmup(sym, book, klines);
+            }, stoppingToken);
+            _log.LogInfo($"行情微观结构预热完成：币种={string.Join(',', _feed.Symbols)}");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarn($"行情微观结构预热跳过/降级: {ex.Message}");
+        }
+
         await _feed.StartAsync(stoppingToken);
         _log.LogInfo($"行情管道启动：数据源={_feed.Mode} 币种={string.Join(',', _feed.Symbols)}");
+
+        // 立即发布首轮预热后的市场行情，看板无须等待定时器
+        PublishMarketTick(_runtime.Snapshot());
 
         using var uiTimer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         var tickCount = 0;

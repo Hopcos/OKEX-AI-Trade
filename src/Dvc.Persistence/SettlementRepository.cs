@@ -50,6 +50,19 @@ public sealed class SettlementRepository(AppDb db)
         return rows.Select(Unmap).ToList();
     }
 
+    /// <summary>按时间下限获取最近结算快照（最新在前，供看板启动预加载复利阶梯曲线）。</summary>
+    public async Task<IReadOnlyList<AccountSettlement>> ListSinceAsync(DateTime? sinceUtc = null, int limit = 240, CancellationToken ct = default)
+    {
+        using var conn = db.Open();
+        var rows = sinceUtc is null
+            ? await conn.QueryAsync<SettlementRow>(new CommandDefinition(
+                "SELECT * FROM Asset_Snapshot ORDER BY Id DESC LIMIT @limit", new { limit }, cancellationToken: ct))
+            : await conn.QueryAsync<SettlementRow>(new CommandDefinition(
+                "SELECT * FROM Asset_Snapshot WHERE SnapshotAtUtc >= @since ORDER BY Id DESC LIMIT @limit",
+                new { since = SqliteFmt.Iso(sinceUtc.Value.ToUniversalTime()), limit }, cancellationToken: ct));
+        return rows.Select(Unmap).ToList();
+    }
+
     private static AccountSettlement Unmap(SettlementRow r) => new()
     {
         Id = r.Id,

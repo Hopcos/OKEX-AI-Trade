@@ -75,6 +75,89 @@ public sealed class OkxMarketFeed : IMarketDataFeed
         }
     }
 
+    public async Task WarmupAsync(Action<string, OrderBookSnapshot?, IReadOnlyList<Kline>> onWarmup, CancellationToken ct)
+    {
+        var tasks = _symbols.Select(async sym =>
+        {
+            OrderBookSnapshot? book = null;
+            var klines = new List<Kline>();
+
+            // 1. 拉取盘口五档
+            try
+            {
+                using var bResp = await _http.GetAsync($"/api/v5/market/books?instId={Uri.EscapeDataString(sym)}&sz=5", ct);
+                if (bResp.IsSuccessStatusCode)
+                {
+                    var bText = await bResp.Content.ReadAsStringAsync(ct);
+                    using var bDoc = JsonDocument.Parse(bText);
+                    if (bDoc.RootElement.TryGetProperty("data", out var bData) && bData.ValueKind == JsonValueKind.Array && bData.GetArrayLength() > 0)
+                    {
+                        var first = bData[0];
+                        var asks = ParseLevels(first, "asks");
+                        var bids = ParseLevels(first, "bids");
+                        if (asks.Count > 0 && bids.Count > 0)
+                        {
+                            book = new OrderBookSnapshot(sym, DateTime.UtcNow, bids, asks);
+                            lock (_lock)
+                            {
+                                _books[sym] = book;
+                                if (book.IsValid)
+                                {
+                                    _lastPrice[sym] = book.Mid;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // 预热盘口失败不中断
+            }
+
+            // 2. 拉取最近 60 根 1m K 线（涵盖过去 1 小时，用于计算 15M 涨跌、1H 波幅、5M 成交额）
+            try
+            {
+                using var cResp = await _http.GetAsync($"/api/v5/market/candles?instId={Uri.EscapeDataString(sym)}&bar=1m&limit=60", ct);
+                if (cResp.IsSuccessStatusCode)
+                {
+                    var cText = await cResp.Content.ReadAsStringAsync(ct);
+                    using var cDoc = JsonDocument.Parse(cText);
+                    if (cDoc.RootElement.TryGetProperty("data", out var cData) && cData.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var k in cData.EnumerateArray())
+                        {
+                            if (k.GetArrayLength() < 8 || k[0].ValueKind != JsonValueKind.String)
+                            {
+                                continue;
+                            }
+
+                            if (long.TryParse(k[0].GetString(), out var tsMs) &&
+                                decimal.TryParse(k[1].GetString(), out var o) &&
+                                decimal.TryParse(k[2].GetString(), out var h) &&
+                                decimal.TryParse(k[3].GetString(), out var l) &&
+                                decimal.TryParse(k[4].GetString(), out var c) &&
+                                decimal.TryParse(k[5].GetString(), out var v))
+                            {
+                                decimal.TryParse(k[7].GetString(), out var quoteVol);
+                                var openTime = DateTimeOffset.FromUnixTimeMilliseconds(tsMs).UtcDateTime;
+                                klines.Add(new Kline(sym, "1m", openTime, o, h, l, c, v, quoteVol));
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // 预热 K 线失败不中断
+            }
+
+            onWarmup(sym, book, klines);
+        });
+
+        await Task.WhenAll(tasks);
+    }
+
     private async Task RunLoopAsync(CancellationToken ct)
     {
         var attempt = 0;

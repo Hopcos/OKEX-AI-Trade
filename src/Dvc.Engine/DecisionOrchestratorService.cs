@@ -361,7 +361,7 @@ public sealed class DecisionOrchestratorService : BackgroundService
 
                         if (guard is not null)
                         {
-                            PublishFlow($"🛡 买入护栏：{targetSymbol} {guard}，本轮不买");
+                            await RecordInterceptAsync(targetSymbol, amount, new RiskVerdict(false, $"买入护栏：{guard}", 0m, "BUY_GUARD"), sessionId, ct);
                             diagnosis += $" | 买入护栏：{guard}";
                             break;
                         }
@@ -474,6 +474,7 @@ public sealed class DecisionOrchestratorService : BackgroundService
                 ThinkingSummary = Summarize(thinking.ToString()),
                 ActionProbabilities = decision.ActionProbabilities,
                 StopWaitProbabilities = decision.StopWaitProbabilities,
+                Ts = DateTime.UtcNow,
             }, DvcJsonContext.Default.UiDecision));
 
         _log.LogInfo($"[决策完成] {sessionId[..8]} action={actionType} vetoed={vetoed} equity=${state.EquityUsd:0.00}"

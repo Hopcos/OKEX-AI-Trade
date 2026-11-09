@@ -30,6 +30,9 @@ public interface IMarketDataFeed : IAsyncDisposable
     bool TryGetOrderBook(string symbol, out OrderBookSnapshot book);
 
     decimal GetLastPrice(string symbol);
+
+    /// <summary>预热盘口微观结构数据（从交易所 REST / 模拟发生器拉取历史 K 线与盘口五档）。</summary>
+    Task WarmupAsync(Action<string, OrderBookSnapshot?, IReadOnlyList<Kline>> onWarmup, CancellationToken ct) => Task.CompletedTask;
 }
 
 /// <summary>

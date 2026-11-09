@@ -26,7 +26,7 @@ public sealed record TradeTick(
     decimal Size,
     string Side /* buy | sell */);
 
-/// <summary>K 线（收盘事件推送）。</summary>
+/// <summary>K 线（收盘事件推送与历史预热）。</summary>
 public sealed record Kline(
     string Symbol,
     string Granularity, // 1m | 15m | 1H
@@ -35,4 +35,5 @@ public sealed record Kline(
     decimal High,
     decimal Low,
     decimal Close,
-    decimal Volume);
+    decimal Volume,
+    decimal Turnover = 0m);

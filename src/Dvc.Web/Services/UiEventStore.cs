@@ -1,8 +1,11 @@
 using System.Text.Json;
 using Dvc.Core;
+using Dvc.Core.Ai;
+using Dvc.Core.Configuration;
 using Dvc.Core.Events;
 using Dvc.Core.Trading;
 using Dvc.Engine;
+using Dvc.Persistence;
 
 namespace Dvc.Web.Services;
 
@@ -35,14 +38,217 @@ public sealed class UiEventStore : IDisposable
     public event Action<UiOrderEvent>? OrderArrived;
     public event Action<UiHaltEvent>? Halted;
 
-    public UiEventStore(EngineEventBus bus, RuntimeState runtime)
+    public UiEventStore(
+        EngineEventBus bus,
+        RuntimeState runtime,
+        OrderRepository? orderRepo = null,
+        ThoughtRepository? thoughtRepo = null,
+        SettlementRepository? settlementRepo = null,
+        RiskInterceptRepository? interceptRepo = null,
+        TradingOptions? options = null)
     {
         // 构造时直接用运行态快照初始化 Config：单例是延迟创建的（首个电路才建），
         // 启动时的 ModeChanged 广播可能因通道尚未创建而丢失，导致 Ui.Store.Config 一直为 null，
         // 进而"盘口微观结构"等依赖 Config.ActiveSymbol 的模块永远显示"等待行情数据"。
         _config = ToTick(runtime.Snapshot());
+        HydrateFromDb(orderRepo, thoughtRepo, settlementRepo, interceptRepo, options?.LedgerStartUtc);
         _channel = bus.CreateChannel();
         _loop = Task.Run(LoopAsync);
+    }
+
+    private void HydrateFromDb(
+        OrderRepository? orderRepo,
+        ThoughtRepository? thoughtRepo,
+        SettlementRepository? settlementRepo,
+        RiskInterceptRepository? interceptRepo,
+        DateTime? sinceUtc)
+    {
+        if (orderRepo is null && thoughtRepo is null && settlementRepo is null && interceptRepo is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // 1. 订单流水（Trade_Order，过滤 >= LedgerStartUtc）
+            if (orderRepo is not null)
+            {
+                var orders = orderRepo.ListSinceAsync(sinceUtc, limit: 80).GetAwaiter().GetResult();
+                foreach (var o in orders)
+                {
+                    var tag = o.Status switch
+                    {
+                        OrderStatus.Filled => "成交",
+                        OrderStatus.Cancelled => "撤单",
+                        OrderStatus.Rejected => "被拒",
+                        OrderStatus.Pending => "挂单",
+                        OrderStatus.Queued => "排队",
+                        _ => "",
+                    };
+
+                    _orders.Add(new UiOrderEvent
+                    {
+                        ClientOrderId = o.ClientOrderId,
+                        Symbol = o.Symbol,
+                        Side = o.Side.ToString(),
+                        Price = o.FilledAvgPrice > 0 ? o.FilledAvgPrice : o.Price,
+                        AmountUsd = o.AmountUsd,
+                        Status = o.Status.ToString(),
+                        RealizedPnl = o.RealizedPnl,
+                        Tag = tag,
+                        Ts = o.UpdatedAtUtc ?? o.CreatedAtUtc,
+                    });
+                }
+            }
+
+            // 2. 决策记录（Agent_Thought_Log）与思考链缓冲（过滤 >= LedgerStartUtc）
+            IReadOnlyList<ThoughtRecord> thoughts = [];
+            if (thoughtRepo is not null)
+            {
+                thoughts = thoughtRepo.ListSinceAsync(sinceUtc, limit: 40).GetAwaiter().GetResult();
+                foreach (var t in thoughts)
+                {
+                    AiOutputDecision? aiDecision = null;
+                    if (!string.IsNullOrWhiteSpace(t.DecisionJson))
+                    {
+                        try
+                        {
+                            aiDecision = JsonSerializer.Deserialize(t.DecisionJson, DvcJsonContext.Default.AiOutputDecision);
+                        }
+                        catch
+                        {
+                            // 忽略脏数据
+                        }
+                    }
+
+                    var targetSymbol = aiDecision?.ImmediateExecutionOrder.TargetSymbol;
+                    if (string.IsNullOrEmpty(targetSymbol))
+                    {
+                        targetSymbol = aiDecision?.TargetConfigStatus.ActiveSymbol ?? "";
+                    }
+
+                    _decisions.Add(new UiDecision
+                    {
+                        SessionId = t.SessionId,
+                        Diagnosis = !string.IsNullOrEmpty(t.Diagnosis) ? t.Diagnosis : (aiDecision?.DecisionLogic.Diagnosis ?? ""),
+                        ActionType = !string.IsNullOrEmpty(t.ActionType) ? t.ActionType : (aiDecision?.DecisionLogic.ActionType ?? "HOLD"),
+                        Vetoed = t.RiskVetoed,
+                        VetoReason = t.RiskReason,
+                        TargetSymbol = targetSymbol,
+                        EquityAfter = t.EquityAfter,
+                        ThinkingSummary = Summarize(t.ThinkingText),
+                        ActionProbabilities = aiDecision?.ActionProbabilities,
+                        StopWaitProbabilities = aiDecision?.StopWaitProbabilities,
+                        Ts = t.CreatedAtUtc,
+                    });
+                }
+
+                // 思考链回显：取最近 3 条思考记录注入缓冲（按时间正序回放）
+                foreach (var t in thoughts.Take(3).Reverse())
+                {
+                    if (!string.IsNullOrWhiteSpace(t.ThinkingText))
+                    {
+                        _thoughtBuffer.Add(new UiThoughtChunk
+                        {
+                            SessionId = t.SessionId,
+                            Text = t.ThinkingText,
+                            Trigger = t.TriggerReason,
+                        });
+                    }
+                }
+            }
+
+            // 3. 账户结算历史（Asset_Snapshot）与复利阶梯图（过滤 >= LedgerStartUtc）
+            IReadOnlyList<AccountSettlement> settlements = [];
+            if (settlementRepo is not null)
+            {
+                settlements = settlementRepo.ListSinceAsync(sinceUtc, limit: 240).GetAwaiter().GetResult();
+                // 曲线图要求按时间升序（从旧到新）
+                foreach (var s in settlements.Reverse())
+                {
+                    _accountHistory.Add(new AccountPoint(s.SnapshotAtUtc, s.EquityUsd, s.MaxOrderSize, s.AvailableUsd));
+                }
+
+                if (_account is null && settlements.Count > 0)
+                {
+                    var latest = settlements[0];
+                    Dictionary<string, decimal> holdings = [];
+                    try
+                    {
+                        holdings = JsonSerializer.Deserialize(latest.HoldingsJson, DvcJsonContext.Default.DictionaryStringDecimal) ?? [];
+                    }
+                    catch
+                    {
+                        // 忽略
+                    }
+
+                    _account = new UiAccountTick
+                    {
+                        InitialCapital = latest.InitialCapital,
+                        AvailableUsd = latest.AvailableUsd,
+                        EquityUsd = latest.EquityUsd,
+                        AccumulatedProfit = Math.Round(latest.EquityUsd - latest.InitialCapital, 2),
+                        RealizedPnl = Math.Round(latest.RealizedPnl, 2),
+                        UnrealizedPnl = Math.Round(latest.EquityUsd - latest.InitialCapital - latest.RealizedPnl, 2),
+                        MaxOrderSize = latest.MaxOrderSize,
+                        Holdings = holdings,
+                        RunState = _config?.RunState ?? "Running",
+                    };
+                }
+            }
+
+            // 4. 风控拦截与中枢流水（FlowLogs & RiskShield，过滤 >= LedgerStartUtc）
+            var flowItems = new List<(DateTime Ts, string Msg)>();
+
+            if (interceptRepo is not null)
+            {
+                var intercepts = interceptRepo.ListSinceAsync(sinceUtc, limit: 20).GetAwaiter().GetResult();
+                foreach (var r in intercepts)
+                {
+                    flowItems.Add((r.CreatedAtUtc, $"🛡 风控拦截 [{r.Kind}]：{r.Detail} ({r.Symbol} ${r.RequestedAmount:0.00})"));
+                }
+            }
+
+            foreach (var t in thoughts)
+            {
+                var shortId = t.SessionId.Length > 8 ? t.SessionId[..8] : t.SessionId;
+                if (t.RiskVetoed)
+                {
+                    flowItems.Add((t.CreatedAtUtc, $"🛡 决策否决 [{shortId}]：{t.RiskReason} (动作 {t.ActionType})"));
+                }
+                else if (!string.IsNullOrEmpty(t.Diagnosis))
+                {
+                    flowItems.Add((t.CreatedAtUtc, $"[决策] [{shortId}] {t.ActionType} · {t.Diagnosis}"));
+                }
+            }
+
+            foreach (var o in _orders)
+            {
+                flowItems.Add((o.Ts, $"[订单] {o.Symbol} {o.Side} ${o.AmountUsd:0.00} 状态={o.Status}"));
+            }
+
+            // 按时间倒序（最新在前）加入 _flows
+            foreach (var item in flowItems.OrderByDescending(f => f.Ts).Take(100))
+            {
+                _flows.Add(new UiFlowLog { Message = item.Msg });
+            }
+        }
+        catch (Exception ex)
+        {
+            // 预加载容错降级，不阻碍主服务启动
+            Console.WriteLine($"[UiEventStore] 启动预加载历史数据异常: {ex.Message}");
+        }
+    }
+
+    private static string Summarize(string thinking)
+    {
+        if (string.IsNullOrWhiteSpace(thinking))
+        {
+            return "";
+        }
+
+        var lines = thinking.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return lines.Length > 3 ? string.Join('\n', lines[^3..]) : thinking;
     }
 
     private static UiConfigTick ToTick(TradingConfig cfg) => new()
@@ -194,8 +400,8 @@ public sealed class UiEventStore : IDisposable
                         }
                     }
 
+                    // 分片仅推送给思考流组件（增量追加），不触发全局 Changed，避免逐 token 全站重绘
                     ThoughtChunk?.Invoke(chunk);
-                    FireChanged();
                 }
 
                 break;
@@ -273,7 +479,46 @@ public sealed class UiEventStore : IDisposable
         }
     }
 
-    private void FireChanged() => Changed?.Invoke();
+    // 通知节流：行情（每秒多币种）与思考分片（逐 token）会产生极高频事件。
+    // 若每个事件都同步触发 Changed，所有订阅组件都会各自 StateHasChanged，导致整页卡顿、
+    // Tab 切换与主题切换响应变慢。这里把同一时间窗口内的变更合并为一次通知（脏标记 + 节流）。
+    private int _notifyPending;
+    private long _lastNotifyTicks;
+    private static readonly long NotifyIntervalTicks = TimeSpan.FromMilliseconds(250).Ticks;
+
+    private void FireChanged()
+    {
+        // 已有待发送的通知则合并，不再重复排队
+        if (Interlocked.CompareExchange(ref _notifyPending, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var elapsed = DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastNotifyTicks);
+        if (elapsed >= NotifyIntervalTicks)
+        {
+            RaiseChangedNow();
+        }
+        else
+        {
+            var delayMs = (int)((NotifyIntervalTicks - elapsed) / TimeSpan.TicksPerMillisecond);
+            _ = Task.Delay(Math.Max(1, delayMs)).ContinueWith(_ => RaiseChangedNow(), TaskScheduler.Default);
+        }
+    }
+
+    private void RaiseChangedNow()
+    {
+        Interlocked.Exchange(ref _notifyPending, 0);
+        Interlocked.Exchange(ref _lastNotifyTicks, DateTime.UtcNow.Ticks);
+        try
+        {
+            Changed?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[UiEventStore] 通知订阅者异常: {ex.Message}");
+        }
+    }
 
     private List<T> Copy<T>(List<T> source)
     {

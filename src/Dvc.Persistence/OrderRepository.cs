@@ -91,6 +91,19 @@ public sealed class OrderRepository(AppDb db)
         return rows.Select(Unmap).ToList();
     }
 
+    /// <summary>按时间下限获取最近订单（最新在前，供看板启动预加载）。</summary>
+    public async Task<IReadOnlyList<OrderRecord>> ListSinceAsync(DateTime? sinceUtc = null, int limit = 80, CancellationToken ct = default)
+    {
+        using var conn = db.Open();
+        var rows = sinceUtc is null
+            ? await conn.QueryAsync<OrderRow>(new CommandDefinition(
+                "SELECT * FROM Trade_Order ORDER BY Id DESC LIMIT @limit", new { limit }, cancellationToken: ct))
+            : await conn.QueryAsync<OrderRow>(new CommandDefinition(
+                "SELECT * FROM Trade_Order WHERE CreatedAtUtc >= @since ORDER BY Id DESC LIMIT @limit",
+                new { since = SqliteFmt.Iso(sinceUtc.Value.ToUniversalTime()), limit }, cancellationToken: ct));
+        return rows.Select(Unmap).ToList();
+    }
+
     private static object Map(OrderRecord o) => new
     {
         o.ClientOrderId,

@@ -50,6 +50,28 @@ public sealed class RiskInterceptRepository(AppDb db)
         }).ToList();
     }
 
+    /// <summary>按时间下限获取最近风控拦截记录（最新在前，供看板启动预加载）。</summary>
+    public async Task<IReadOnlyList<RiskInterceptRecord>> ListSinceAsync(DateTime? sinceUtc = null, int limit = 20, CancellationToken ct = default)
+    {
+        using var conn = db.Open();
+        var rows = sinceUtc is null
+            ? await conn.QueryAsync<InterceptRow>(new CommandDefinition(
+                "SELECT * FROM Risk_Intercept ORDER BY Id DESC LIMIT @limit", new { limit }, cancellationToken: ct))
+            : await conn.QueryAsync<InterceptRow>(new CommandDefinition(
+                "SELECT * FROM Risk_Intercept WHERE CreatedAtUtc >= @since ORDER BY Id DESC LIMIT @limit",
+                new { since = SqliteFmt.Iso(sinceUtc.Value.ToUniversalTime()), limit }, cancellationToken: ct));
+        return rows.Select(r => new RiskInterceptRecord
+        {
+            Id = r.Id,
+            CreatedAtUtc = SqliteFmt.FromIso(r.CreatedAtUtc),
+            Kind = r.Kind,
+            Symbol = r.Symbol,
+            RequestedAmount = r.RequestedAmount,
+            AllowedAmount = r.AllowedAmount,
+            Detail = r.Detail,
+        }).ToList();
+    }
+
     private sealed class InterceptRow
     {
         public long Id { get; set; }

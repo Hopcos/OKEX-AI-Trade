@@ -8,7 +8,7 @@
 }
 else
 {
-    <div class="chart-wrap">
+    <div class="chart-wrap" @ref="_wrap" data-points="@PointsJson">
         <svg viewBox="0 0 600 220" preserveAspectRatio="none" class="chart-svg">
             @* 网格线 *@
             @for (var i = 0; i <= 4; i++)
@@ -18,7 +18,7 @@ else
             }
 
             @* 初始本金红线（横向死守） *@
-            <line x1="0" y1="@Y(Initial)" x2="600" y2="@Y(Initial)" class="chart-line-initial" stroke-dasharray="6 4" />
+            <line x1="0" y1="@Y_Equity(Initial)" x2="600" y2="@Y_Equity(Initial)" class="chart-line-initial" stroke-dasharray="6 4" />
 
             @* 当前最大下单上限蓝线（复利阶梯） *@
             <polyline points="@MaxOrderPoints" class="chart-line-max" fill="none" />
@@ -27,15 +27,27 @@ else
             <polyline points="@EquityPoints" class="chart-line-equity" fill="none" />
 
             @* 末点圆点 *@
-            <circle cx="598" cy="@Y(LastEquity)" r="4" class="chart-dot-equity" />
+            <circle cx="598" cy="@Y_Equity(LastEquity)" r="4" class="chart-dot-equity" />
+
+            @* 悬停高亮（竖线 + 双圆点）由前端 JS 直接操作 DOM，不经服务器往返 *@
+            <line class="chart-hover-line" x1="0" y1="0" x2="0" y2="220" style="display:none" data-hover="line" />
+            <circle class="chart-dot-equity" cx="0" cy="0" r="3.5" style="display:none" data-hover="eq" />
+            <circle class="chart-dot-max" cx="0" cy="0" r="3.5" style="display:none" data-hover="mx" />
         </svg>
-        <div class="chart-overlay-label" style="top: @(Y(Initial) / 2.2m)% ; color: var(--accent-neg);">$@Initial.ToString("0.00") 初始本金红线</div>
-        <div class="chart-overlay-label" style="top: @(Y(LastMax) / 2.2m)%; color: var(--accent-info);">上限 $@LastMax.ToString("0.00")</div>
+        <div class="chart-tooltip" style="display:none" data-hover="tip">
+            <div class="tt-time" data-hover="time"></div>
+            <div class="tt-row eq"><span>总权益</span><b data-hover="eqv"></b></div>
+            <div class="tt-row mx"><span>单笔上限</span><b data-hover="mxv"></b></div>
+            <div class="tt-row"><span>可用资金</span><span data-hover="avail"></span></div>
+        </div>
+
+        <div class="chart-overlay-label" style="top: @((Y_Equity(Initial) / 2.2m).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture))%; color: var(--accent-neg);">$@Initial.ToString("0.00") 初始本金红线</div>
+        <div class="chart-overlay-label" style="top: @((Y_MaxOrder(LastMax) / 2.2m).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture))%; color: var(--accent-info);">上限 $@LastMax.ToString("0.00")</div>
     </div>
     <div class="chart-legend">
-        <span class="legend-item"><i class="swatch sw-equity"></i>总权益（复利阶梯）</span>
+        <span class="legend-item"><i class="swatch sw-equity"></i>总权益 $@LastEquity.ToString("0.00")（复利阶梯）</span>
         <span class="legend-item"><i class="swatch sw-initial"></i>初始本金 $@Initial.ToString("0.00")</span>
-        <span class="legend-item"><i class="swatch sw-max"></i>单笔买单上限（权益 × @((Store.Account?.MaxOrderSizeRatio ?? 0.20m).ToString("P0"))）</span>
+        <span class="legend-item"><i class="swatch sw-max"></i>单笔买单上限 $@LastMax.ToString("0.00")（权益 × @((Store.Account?.MaxOrderSizeRatio ?? 0.18m).ToString("P0"))）</span>
     </div>
 }
 
@@ -46,13 +58,80 @@ else
     private decimal LastEquity => Points.Count > 0 ? Points[^1].Equity : Initial;
     private decimal LastMax => Points.Count > 0 ? Points[^1].MaxOrderSize : 0m;
 
-    private decimal MinV => Math.Min(Initial, Points.Count > 0 ? Points.Min(p => Math.Min(p.Equity, p.MaxOrderSize)) : Initial);
-    private decimal MaxV => Math.Max(Initial, Points.Count > 0 ? Points.Max(p => Math.Max(p.Equity, p.MaxOrderSize)) : Initial + 1m);
+    // 权益与初始本金动态 Y 轴范围（自适应波动区间，避免被下单上限拉扁为水平直线）
+    private decimal MinEquity
+    {
+        get
+        {
+            var min = Math.Min(Initial, Points.Count > 0 ? Points.Min(p => p.Equity) : Initial);
+            var max = Math.Max(Initial, Points.Count > 0 ? Points.Max(p => p.Equity) : Initial);
+            var span = max - min;
+            var pad = Math.Max(0.40m, span * 0.15m);
+            return Math.Max(0m, min - pad);
+        }
+    }
 
-    private string EquityPoints => BuildLine(p => p.Equity);
-    private string MaxOrderPoints => BuildLine(p => p.MaxOrderSize);
+    private decimal MaxEquity
+    {
+        get
+        {
+            var min = Math.Min(Initial, Points.Count > 0 ? Points.Min(p => p.Equity) : Initial);
+            var max = Math.Max(Initial, Points.Count > 0 ? Points.Max(p => p.Equity) : Initial);
+            var span = max - min;
+            var pad = Math.Max(0.40m, span * 0.15m);
+            return max + pad;
+        }
+    }
 
-    private string BuildLine(Func<UiEventStore.AccountPoint, decimal> selector)
+    private decimal Y_Equity(decimal v)
+    {
+        var range = MaxEquity - MinEquity;
+        if (range <= 0)
+        {
+            return 80;
+        }
+
+        return 145m - (v - MinEquity) / range * 125m;
+    }
+
+    // 单笔买单上限自适应独立 Y 轴范围（放置在图表底部阶梯区间）
+    private decimal MinMaxOrder
+    {
+        get
+        {
+            var min = Points.Count > 0 ? Points.Min(p => p.MaxOrderSize) : 0m;
+            var max = Points.Count > 0 ? Points.Max(p => p.MaxOrderSize) : 10m;
+            var span = Math.Max(0.10m, max - min);
+            return Math.Max(0m, min - span * 0.2m);
+        }
+    }
+
+    private decimal MaxMaxOrder
+    {
+        get
+        {
+            var min = Points.Count > 0 ? Points.Min(p => p.MaxOrderSize) : 0m;
+            var max = Points.Count > 0 ? Points.Max(p => p.MaxOrderSize) : 10m;
+            var span = Math.Max(0.10m, max - min);
+            return max + span * 0.2m;
+        }
+    }
+
+    private decimal Y_MaxOrder(decimal v)
+    {
+        var range = MaxMaxOrder - MinMaxOrder;
+        if (range <= 0)
+        {
+            return 185;
+        }
+
+        return 205m - (v - MinMaxOrder) / range * 45m;
+    }
+
+    private string EquityPoints => BuildStepLine(p => p.Equity, Y_Equity);
+    private string MaxOrderPoints => BuildStepLine(p => p.MaxOrderSize, Y_MaxOrder);
+
+    private string BuildStepLine(Func<UiEventStore.AccountPoint, decimal> selector, Func<decimal, decimal> yMap)
     {
         if (Points.Count == 0)
         {
@@ -64,22 +143,56 @@ else
         for (var i = 0; i < n; i++)
         {
             var x = i == 0 ? 0 : 600m * i / (n - 1);
-            parts.Add($"{(int)x},{Y(selector(Points[i])):0}");
+            var y = yMap(selector(Points[i]));
+            if (i > 0)
+            {
+                // 阶梯折线：先横拉保持上一阶段数值，再跳变到新高度，呈现真实复利阶梯
+                var prevY = yMap(selector(Points[i - 1]));
+                parts.Add($"{x.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)},{prevY.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}");
+            }
+
+            parts.Add($"{x.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)},{y.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}");
         }
 
         return string.Join(' ', parts);
     }
 
-    private decimal Y(decimal v)
+    // 悬停数据：每个点的 viewBox X 坐标与提示文本，序列化到 data-points，由前端 JS 本地查表渲染
+    private string PointsJson
     {
-        var range = MaxV - MinV;
-        if (range <= 0)
+        get
         {
-            return 120;
-        }
+            var n = Points.Count;
+            if (n < 2)
+            {
+                return "[]";
+            }
 
-        return 200 - (v - MinV) / range * 190m;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var items = new List<string>(n);
+            for (var i = 0; i < n; i++)
+            {
+                var p = Points[i];
+                var x = 600m * i / (n - 1);
+                var ey = Y_Equity(p.Equity);
+                var my = Y_MaxOrder(p.MaxOrderSize);
+                items.Add("{" +
+                    $"\"x\":{x.ToString("0.0", inv)}," +
+                    $"\"ey\":{ey.ToString("0.0", inv)}," +
+                    $"\"my\":{my.ToString("0.0", inv)}," +
+                    $"\"t\":\"{Fmt.Time(p.T)}\"," +
+                    $"\"eq\":\"${p.Equity.ToString("0.00", inv)}\"," +
+                    $"\"mx\":\"${p.MaxOrderSize.ToString("0.00", inv)}\"," +
+                    $"\"av\":\"${p.Available.ToString("0.00", inv)}\"" +
+                    "}");
+            }
+
+            return "[" + string.Join(',', items) + "]";
+        }
     }
+
+    // 组件仅渲染静态数据；测量宽度与悬停由 site.js 处理，避免每次鼠标移动都经服务器往返
+    private Microsoft.AspNetCore.Components.ElementReference _wrap;
 
     protected override void OnInitialized() => Store.Changed += OnChanged;
 

@@ -122,6 +122,9 @@ public sealed class UiDecision
 
     [JsonPropertyName("stopWaitProbabilities")]
     public string? StopWaitProbabilities { get; set; }
+
+    [JsonPropertyName("ts")]
+    public DateTime Ts { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>订单事件推送 DTO。</summary>

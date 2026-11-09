@@ -56,6 +56,50 @@ public sealed class MarketContextStore
         }
     }
 
+    /// <summary>
+    /// 启动预热：注入历史 1m K 线与盘口快照，使 15M 涨跌、1H 波幅、5M 成交额与价差立即具有实际真实数据。
+    /// </summary>
+    public void Warmup(string symbol, OrderBookSnapshot? book, IReadOnlyList<Kline> klines1m)
+    {
+        lock (_lock)
+        {
+            var st = Get(symbol);
+            if (book is not null && book.IsValid)
+            {
+                st.Book = book;
+                if (st.LastPrice <= 0)
+                {
+                    st.LastPrice = book.Mid;
+                }
+            }
+
+            var cutoff1H = DateTime.UtcNow.AddHours(-1);
+            var cutoff5M = DateTime.UtcNow.AddMinutes(-5);
+
+            foreach (var k in klines1m.OrderBy(k => k.OpenTimeUtc))
+            {
+                st.LastPrice = k.Close;
+                st.Samples.Enqueue((k.OpenTimeUtc, k.Close));
+
+                var turnover = k.Turnover > 0 ? k.Turnover : (k.Volume * k.Close);
+                if (turnover > 0)
+                {
+                    st.Flows.Enqueue((k.OpenTimeUtc, turnover, true));
+                }
+            }
+
+            while (st.Samples.Count > 0 && st.Samples.Peek().T < cutoff1H.AddMinutes(-10))
+            {
+                st.Samples.Dequeue();
+            }
+
+            while (st.Flows.Count > 0 && st.Flows.Peek().T < cutoff5M)
+            {
+                st.Flows.Dequeue();
+            }
+        }
+    }
+
     public MarketContext Build(string symbol)
     {
         lock (_lock)

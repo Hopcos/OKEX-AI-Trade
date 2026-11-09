@@ -3,7 +3,7 @@
 <h3 class="card-title">🛡 风控盾牌拦截计数器</h3>
 
 <div class="shield">
-    <div class="shield-num">@(Store.Account?.ShieldCount ?? 0)</div>
+    <div class="shield-num">@EffectiveShieldCount</div>
     <div class="shield-sub">AI 幻觉报单拦截次数（黑名单 / 超额 / 非法动作）</div>
 </div>
 
@@ -16,11 +16,11 @@
 
 <h4 class="sub-title">最近拦截记录</h4>
 <div class="scroll-list">
-    @foreach (var f in Store.Flows.Where(f => f.Message.Contains("🛡")).Take(8))
+    @foreach (var f in InterceptFlows.Take(8))
     {
         <div class="log-line warn">@f.Message</div>
     }
-    @if (!Store.Flows.Any(f => f.Message.Contains("🛡")))
+    @if (!InterceptFlows.Any())
     {
         <div class="hint">暂无拦截，风控盾牌守护中……</div>
     }
@@ -28,6 +28,18 @@
 
 @code {
     private UiEventStore Store => Ui.Store;
+
+    private IEnumerable<UiFlowLog> InterceptFlows => Store.Flows.Where(f => f.Message.Contains("🛡"));
+
+    private long EffectiveShieldCount
+    {
+        get
+        {
+            var count = Store.Account?.ShieldCount ?? 0;
+            var flowCount = InterceptFlows.Count();
+            return Math.Max(count, flowCount);
+        }
+    }
 
     protected override void OnInitialized() => Store.Changed += OnChanged;
 
