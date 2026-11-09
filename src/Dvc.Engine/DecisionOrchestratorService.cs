@@ -346,6 +346,13 @@ public sealed class DecisionOrchestratorService : BackgroundService
                         {
                             guard = $"15M 趋势 {ctx.TrendSignal15M}（{ctx.Change15MPercent:0.00}%）下跌中不接刀";
                         }
+                        else if (pf.MaxBuyRangePositionPercent > 0m &&
+                                 ctx.RangePosition1HPercent is { } rangePos &&
+                                 ctx.Volatility1HPercent >= pf.MinRangeForPositionGuardPercent &&
+                                 rangePos > pf.MaxBuyRangePositionPercent)
+                        {
+                            guard = $"价格处于近 1 小时区间 {rangePos:0}% 高位 > {pf.MaxBuyRangePositionPercent:0.##}%，不追高";
+                        }
                         else if (pf.NoAverageDownPercent > 0m && holdingNow &&
                                  state.AvgCosts.TryGetValue(baseCcyG, out var avgG) && avgG > 0m && ctx.LastPrice > 0m &&
                                  (avgG - ctx.LastPrice) / avgG * 100m > pf.NoAverageDownPercent)

@@ -143,6 +143,19 @@ public sealed class ProfitOptions
     /// <summary>同一交易对两次买入的最小间隔（秒，默认 180，0 = 关闭）：防止同一信号连续 14 笔满额扫货。</summary>
     public int BuyCooldownSeconds { get; set; } = 180;
 
+    /// <summary>
+    /// 高位不追（%，默认 0 = 关闭）：现价处于近 1 小时价格区间的位置（0 = 区间最低，100 = 最高）高于该值时拒绝买入。
+    /// 例：80 表示只在区间下方 80% 内买入，不在近 1 小时最高的 20% 区域追高。
+    /// 对空转试单同样生效。区间样本不足或波幅小于 <see cref="MinRangeForPositionGuardPercent"/> 时不判断。
+    /// </summary>
+    public decimal MaxBuyRangePositionPercent { get; set; }
+
+    /// <summary>
+    /// 高位不追的最小有效波幅（%，默认 0.2）：近 1 小时 (max-min)/min 低于该值时区间过窄，
+    /// "位置"没有意义（几个 tick 就会从 0% 跳到 100%），此时放行，不启用高位护栏。
+    /// </summary>
+    public decimal MinRangeForPositionGuardPercent { get; set; } = 0.2m;
+
     /// <summary>止盈目标衰减到底的净利润（bps，默认 2）：仍保证扣完双边手续费后不亏钱。</summary>
     public decimal MinNetProfitFloorBps { get; set; } = 2m;
 

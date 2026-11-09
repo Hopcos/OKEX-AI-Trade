@@ -33,6 +33,12 @@ public sealed class MarketContext
     /// <summary>过去 1 小时波幅（%）：(max-min)/min * 100。</summary>
     public decimal Volatility1HPercent { get; init; }
 
+    /// <summary>
+    /// 现价在近 1 小时价格区间中的位置（%）：0 = 区间最低，100 = 区间最高；样本不足（&lt; 2 个）时为 null。
+    /// 用于"高位不追"买入护栏。
+    /// </summary>
+    public decimal? RangePosition1HPercent { get; init; }
+
     /// <summary>15 分钟趋势信号（BULLISH_STRONG / BULLISH / NEUTRAL / BEARISH / BEARISH_STRONG）。</summary>
     public string TrendSignal15M { get; init; } = "NEUTRAL";
 

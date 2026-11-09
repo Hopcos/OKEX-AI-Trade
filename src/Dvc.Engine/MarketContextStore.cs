@@ -179,6 +179,7 @@ public sealed class MarketContextStore
 
         // 1H 波幅：样本窗口内 (max-min)/min
         var vol1H = 0m;
+        decimal? rangePos1H = null;
         var cutoff1H = now.AddHours(-1);
         var window = st.Samples.Where(s => s.T >= cutoff1H).ToList();
         if (window.Count > 1)
@@ -188,6 +189,17 @@ public sealed class MarketContextStore
             if (min > 0)
             {
                 vol1H = (max - min) / min * 100m;
+            }
+
+            // 区间位置：现价也纳入区间，突破近 1 小时高/低点时位置为 100 / 0（不影响上面的波幅口径）
+            if (lastPrice > 0 && min > 0)
+            {
+                var lo = Math.Min(min, lastPrice);
+                var hi = Math.Max(max, lastPrice);
+                if (hi > lo)
+                {
+                    rangePos1H = Math.Round((lastPrice - lo) / (hi - lo) * 100m, 1);
+                }
             }
         }
 
@@ -242,6 +254,7 @@ public sealed class MarketContextStore
             BidLevels = book?.Bids ?? [],
             AskLevels = book?.Asks ?? [],
             Volatility1HPercent = Math.Round(vol1H, 2),
+            RangePosition1HPercent = rangePos1H,
             Change15MPercent = Math.Round(change15M, 3),
             TrendSignal15M = trend,
             Turnover5M = Math.Round(turnover, 2),

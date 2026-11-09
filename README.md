@@ -66,6 +66,7 @@ $env:Trading__AiProvider = "InternDecision"
 | 逆势接刀拦截 | 15M 趋势为 BEARISH/BEARISH_STRONG 时禁止新开买单（`BlockBuysInDowntrend=true`），避免单边下跌逆势接飞刀 | `DecisionOrchestratorService` |
 | 摊平止损限制 | 已持仓且浮亏超过 `NoAverageDownPercent`（默认 0.3%）时禁止加仓摊低成本，杜绝单边连环扫货套死全部本金 | `DecisionOrchestratorService` |
 | 买入冷却间隔 | 同一交易对买入最小间隔 `BuyCooldownSeconds`（默认 180s），防止单一冲动信号连续满额扫货 | `DecisionOrchestratorService` |
+| 高位不追 | 现价处于近 1 小时区间位置 > `MaxBuyRangePositionPercent`（默认 0 = 关闭）时拒绝买入，对空转试单同样生效 | `DecisionOrchestratorService` + `MarketContextStore` |
 | 盈利护栏 | 卖价必须 ≥ 持仓成本 + 手续费 + `Profit:MinNetProfitBps`；未达保本价就改挂保本价等待，保本价远在盘口之外则继续持有；`StopLossPercent=0` 时关闭主动割肉，现货绝不以盘口买一市价砸盘割肉 | `DecisionOrchestratorService` + `ProfitPolicy` |
 | 总仓位上限 | 持仓 + 挂买单占用 ≤ 权益 × `MaxExposureRatio`；买单额度收敛到剩余空间，满了就只卖不买 | `RiskEngine` + `DecisionOrchestratorService` |
 | 持仓管家 | 独立 2s 巡检：买一 ≥ 保本价立即止盈；否则在保本价挂止盈卖单；若启用止损且触发，以卖一/防守位挂被动单等待反弹，坚决不以买一吃单砸盘；覆盖全部持仓（含已不是聚焦标的的币） | `PositionManagerService` |
@@ -191,6 +192,8 @@ InternDecision 负责每几秒一次的高频战术决策；**大脑**是战略�
 | `BlockBuysInDowntrend` | `true` | **下跌趋势接刀拦截**：15M 趋势为 `BEARISH` 或 `BEARISH_STRONG` 时拒绝新开买单，逆势接飞刀期望为负 |
 | `NoAverageDownPercent` | `0.3` | **摊平止损限制**（%，0=关闭）：已持仓且现价低于持仓均价超过该比例时禁止加仓，防止越跌越买将整笔本金套死 |
 | `BuyCooldownSeconds` | `180` | **买入冷却间隔**（秒，0=关闭）：同一交易对两次买入的最小间隔，防止单点冲动信号连续连环扫货 |
+| `MaxBuyRangePositionPercent` | `0` | **高位不追**（%，0=关闭）：现价在近 1 小时价格区间中的位置（0=最低，100=最高）高于该值时拒绝买入。如 `80` 表示不在区间最高 20% 处追高 |
+| `MinRangeForPositionGuardPercent` | `0.2` | 高位不追的最小有效波幅（%）：近 1 小时波幅低于该值时区间过窄，位置无意义，放行买入 |
 
 ### 6.3 `Trading:Brain`（大脑 LLM 复盘，详见第五节）
 
